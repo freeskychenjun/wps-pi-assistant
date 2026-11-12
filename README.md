@@ -169,3 +169,30 @@ wpsjs debug      # 起 vite 开发服务 :3889，带 HMR
 ```
 
 然后把 `%APPDATA%\kingsoft\wps\jsaddons\publish.xml` 里 pi-assistant 的 url 改回 `http://127.0.0.1:3889/`，重启 WPS。日常用不着，别一直开着。
+
+---
+
+## 七、版本管理（git）
+
+本项目已用 git 管理，仓库就在 `D:\DSH工作区\wps-pi-plugin`（分支 `main`）。
+
+```powershell
+cd "D:\DSH工作区\wps-pi-plugin"
+git status                  # 看改了什么
+git add -A
+git commit -m "说明这次改了什么"
+git log --oneline -10       # 最近 10 次提交
+git diff                    # 未暂存的具体改动
+```
+
+**不入库的东西**（见 `.gitignore`）：`node_modules/`、所有调试截图（`*.png`）、`sessions/`（会话文件）、`sessions-map.json`、`tool-log.json`、`debug.log`、`bridge-config.json`（**可能含 API Key，绝不提交**）、`authaddin.bak-*.json`、测试生成的 `test-*.docx`（用 `make-*.py` 重新生成）。
+
+当前打过一个里程碑标签：`v0.1.0`（P0–P7 完成态）。查看/回退：
+
+```powershell
+git tag -l
+git show v0.1.0 --stat
+git checkout v0.1.0        # 只看不留：看完记得 git switch main
+```
+
+方案文档不在本仓库，在 `D:\DSH工作区\wps-office-cooperate`（那边本来就是 git 仓库），路径 `docs\plugin-pi-agent-方案.md`。
