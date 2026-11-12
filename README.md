@@ -124,6 +124,7 @@
 | `start-bridge.cmd` | 一键启动桥接（幂等） |
 | `ui-helper.ps1` | 调试辅助：截图/点击/裁剪窗口（开发用，日常不需要） |
 | `test-e2e.js` / `test-session.js` / `test-skills.js` | 桥接层测试（不经 WPS，纯 HTTP/SSE；`test-skills.js "问题"` 可验证技能与工具） |
+| `docs/` | 项目文档：`plugin-pi-agent-方案.md`（开发方案与 P0–P7 演进记录） |
 
 **协议要点**：agent 回复里附代码块，侧栏解析后执行。
 
@@ -195,4 +196,4 @@ git show v0.1.0 --stat
 git checkout v0.1.0        # 只看不留：看完记得 git switch main
 ```
 
-方案文档不在本仓库，在 `D:\DSH工作区\wps-office-cooperate`（那边本来就是 git 仓库），路径 `docs\plugin-pi-agent-方案.md`。
+开发方案文档就在本仓库：`docs\plugin-pi-agent-方案.md`（含需求分析、架构、协议、P0–P7 各阶段结果与踩坑记录）。
