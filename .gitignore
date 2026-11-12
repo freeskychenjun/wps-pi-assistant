@@ -1,0 +1,32 @@
+# ===== 依赖与构建产物 =====
+node_modules/
+pi-assistant/node_modules/
+dist/
+
+# ===== 运行态数据（本机私有、随时变化）=====
+# bridge-config.json 里可能存 provider/model/API Key，绝不入库
+bridge-config.json
+sessions/
+sessions-map.json
+tool-log.json
+debug.log
+*.log
+authaddin.bak-*.json
+*.bak
+
+# ===== 调试过程产物：截图 =====
+*.png
+*.jpg
+*.jpeg
+ui-compare.png
+
+# ===== 测试临时文件（用 make-*.py 重新生成）=====
+test-*.docx
+tmp/*.png
+tmp/*.xlsx
+tmp/*.json
+
+# ===== 系统垃圾 =====
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,11 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="OnAddinLoad">
+    <ribbon startFromScratch="false">
+        <tabs>
+            <tab id="piAssistantTab" label="AI 助手">
+                <group id="piGroup" label="pi agent">
+                    <button id="btnShowTaskPane" label="打开侧栏" onAction="OnAction" getEnabled="OnGetEnabled" getImage="GetImage" getVisible="OnGetVisible" size="large"/>
+                </group>
+            </tab>
+        </tabs>
+    </ribbon>
+</customUI>
