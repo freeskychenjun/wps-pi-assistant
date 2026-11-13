@@ -14,6 +14,9 @@ debug.log
 authaddin.bak-*.json
 *.bak
 
+# ===== agent 临时工作目录（不进仓库）=====
+tmp/
+
 # ===== 调试过程产物：截图 =====
 *.png
 *.jpg
