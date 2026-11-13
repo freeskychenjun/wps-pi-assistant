@@ -104,6 +104,8 @@
 
 **安全边界**：pi 只开了**只读 + 执行**类工具（`read` / `ls` / `find` / `grep` / `bash`），**没有** `write` / `edit`——它不能直接改盘，所有文档改动必须经过「侧栏 → 修订写回」这条路。system prompt 里也明令禁止用 bash 去改 .docx/.xlsx、或调用 `docx-paragraph-polish` / `minimax-docx` 这类**离线改磁盘文件**的技能（那些技能改的是磁盘副本，你眼前这份文档不会变）。
 
+**临时文件约定**：pi 的工作目录就是本插件目录（`bridge.js` 里 `spawn(..., cwd: __dirname)`），所以 agent 写的临时文件默认会落在仓库根目录。system prompt 已要求它**一律写到 `tmp\`**（文件名带任务前缀）、**任务结束自己删掉**，不写根目录、不写 `sessions\`、不写用户文档所在目录；要留给你看的产物（图/表/报告）用它任务里指定的绝对路径，不进 `tmp\`。`tmp/` 已在 `.gitignore` 里，临时文件不会污染 `git status`。
+
 ---
 
 ## 四、出问题怎么办
