@@ -1271,23 +1271,52 @@ function stopPi() {
 function parseBlock(text, tag) {
     var re = new RegExp("```" + tag + "\\s*([\\s\\S]*?)```");
     var m = text.match(re);
-    if (!m) return { data: null, clean: text };
+    if (!m) return { data: null, clean: text, raw: null };
     var clean = text.replace(new RegExp("```" + tag + "\\s*[\\s\\S]*?```"), "").trim();
     try {
-        return { data: JSON.parse(m[1].trim()), clean: clean };
+        return { data: JSON.parse(m[1].trim()), clean: clean, raw: m[1].trim() };
     } catch (e) {
-        return { data: null, clean: clean + "\n⚠ " + tag + " 解析失败: " + e.message };
+        return { data: null, clean: clean + "\n⚠ " + tag + " 解析失败: " + e.message, raw: null };
     }
 }
 
 function parseEdits(text) {
     var r = parseBlock(text, "wps-edits");
-    return { edits: r.data ? (r.data.edits || []) : null, clean: r.clean };
+    return { edits: r.data ? (r.data.edits || []) : null, clean: r.clean, raw: r.raw };
 }
 
 function parseComments(text) {
     var r = parseBlock(text, "wps-comments");
-    return { comments: r.data ? (r.data.comments || []) : null, clean: r.clean };
+    return { comments: r.data ? (r.data.comments || []) : null, clean: r.clean, raw: r.raw };
+}
+
+// 把 agent 回复里的 wps-* 指令块折叠成一行「指令明细（…）— 点开查看」，点标题展开/收起原始 JSON（方案 A）
+function lastAiBubble() {
+    var list = document.querySelectorAll("#chatBox .msg.ai");
+    return list.length ? list[list.length - 1] : null;
+}
+
+function addBlockDisclosure(aiDiv, parts) {
+    if (!aiDiv) return;
+    var total = 0, labels = [];
+    for (var i = 0; i < parts.length; i++) {
+        var n = (parts[i].items || []).length;
+        if (!n) continue;
+        total += n;
+        labels.push(parts[i].name + " " + n + " 条");
+    }
+    if (!total) return;
+    var wrap = document.createElement("details");
+    wrap.className = "blkfold";
+    var sum = document.createElement("summary");
+    sum.textContent = "⚙ 指令明细（" + labels.join("、") + "）— 点开查看";
+    wrap.appendChild(sum);
+    var pre = document.createElement("pre");
+    pre.className = "blkraw";
+    pre.textContent = parts.filter(function (p) { return (p.items || []).length; })
+        .map(function (p) { return "```" + p.tag + "\n" + p.raw + "\n```"; }).join("\n\n");
+    wrap.appendChild(pre);
+    aiDiv.appendChild(wrap);
 }
 
 // 统计某段内 find 出现次数（用于唯一性告警）
@@ -1559,7 +1588,7 @@ function applyComments(comments) {
 // ---------- 表格加行 ----------
 function parseRows(text) {
     var r = parseBlock(text, "wps-rows");
-    return { rows: r.data ? (r.data.rows || []) : null, clean: r.clean };
+    return { rows: r.data ? (r.data.rows || []) : null, clean: r.clean, raw: r.raw };
 }
 
 // 按文字定位到表格里的某个单元格（返回表、行号、列号、总行数）
@@ -1640,23 +1669,23 @@ function findParaIdx(doc, text) {
 
 function parseImages(text) {
     var r = parseBlock(text, "wps-image");
-    return { images: r.data ? (r.data.images || []) : null, clean: r.clean };
+    return { images: r.data ? (r.data.images || []) : null, clean: r.clean, raw: r.raw };
 }
 function parseTables(text) {
     var r = parseBlock(text, "wps-tables");
-    return { tables: r.data ? (r.data.tables || []) : null, clean: r.clean };
+    return { tables: r.data ? (r.data.tables || []) : null, clean: r.clean, raw: r.raw };
 }
 function parseOps(text) {
     var r = parseBlock(text, "wps-tableops");
-    return { ops: r.data ? (r.data.ops || []) : null, clean: r.clean };
+    return { ops: r.data ? (r.data.ops || []) : null, clean: r.clean, raw: r.raw };
 }
 function parseCells(text) {
     var r = parseBlock(text, "wps-cells");
-    return { cells: r.data ? (r.data.cells || []) : null, clean: r.clean };
+    return { cells: r.data ? (r.data.cells || []) : null, clean: r.clean, raw: r.raw };
 }
 function parseParas(text) {
     var r = parseBlock(text, "wps-paragraphs");
-    return { paras: r.data ? (r.data.paragraphs || []) : null, clean: r.clean };
+    return { paras: r.data ? (r.data.paragraphs || []) : null, clean: r.clean, raw: r.raw };
 }
 
 // paragraphs: [{after:"锚点段落文字", texts:["第一段","第二段"]}] —— 一次性在锚点后按顺序插入多段（写报告用）
@@ -2320,6 +2349,7 @@ function finishTurn(b) {
             addMsg("edit", applyCells(b.clb.cells));
             did.push("填写单元格 " + b.clb.cells.length + " 个");
         }
+        if (b.blocks) addBlockDisclosure(lastAiBubble(), b.blocks);
         endTurn();
         setStatus(did.length ? "AI 已" + did.join("、") + "，可在「审阅」中处理" : "");
     } catch (e) {
@@ -2397,7 +2427,17 @@ function connectSSE() {
             }
             else if (clb.clean) addMsg("ai", clb.clean);
             setTitleMark(false);
-            var b = { parsed: parsed, cmt: cmt, rws: rws, imgs: imgs, tbls: tbls, opsb: opsb, prb: prb, clb: clb };
+            var b = { parsed: parsed, cmt: cmt, rws: rws, imgs: imgs, tbls: tbls, opsb: opsb, prb: prb, clb: clb,
+                blocks: [
+                    { tag: "wps-edits", name: "修订", items: parsed.edits, raw: parsed.raw },
+                    { tag: "wps-comments", name: "批注", items: cmt.comments, raw: cmt.raw },
+                    { tag: "wps-rows", name: "加行", items: rws.rows, raw: rws.raw },
+                    { tag: "wps-image", name: "插图", items: imgs.images, raw: imgs.raw },
+                    { tag: "wps-tables", name: "建表", items: tbls.tables, raw: tbls.raw },
+                    { tag: "wps-tableops", name: "表结构", items: opsb.ops, raw: opsb.raw },
+                    { tag: "wps-paragraphs", name: "段落", items: prb.paras, raw: prb.raw },
+                    { tag: "wps-cells", name: "填单元格", items: clb.cells, raw: clb.raw }
+                ] };
             var nEdits = (parsed.edits || []).length;
             var nAll = nEdits + (cmt.comments || []).length + (rws.rows || []).length + (imgs.images || []).length +
                 (tbls.tables || []).length + (opsb.ops || []).length + (prb.paras || []).length + (clb.cells || []).length;

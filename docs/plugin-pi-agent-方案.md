@@ -213,3 +213,17 @@
 - UI 自动化：旧脚本用 ALT 解锁前台会打开 WPS 菜单、后续点击被菜单吞掉；改用 `AttachThreadInput + SetForegroundWindow` 后点击/按键才可靠。截图预览 1708×961 与实际 1920×1080 有 1.124 倍率，量坐标要用裁剪放大图。
 
 **验证**：/models 返回 46 个模型、5 个 provider（4 个已配置）；面板点开下拉正常；选 deepseek-v4-pro 点「应用」→ /health model=deepseek-v4-pro、标签变「当前：deepseek-v4-pro」；重启 WPS 后仍是该模型；选「（跟随 pi 默认模型）」→ /health model=null。
+
+### P15 回复里的 wps-* 指令块折叠（方案 A，已完成 2026-11-13）
+
+**动机**：用户问「面板显示的 agent 消息详简程度是否合适」。抽样发现：过程独白（34~56 字）与结论都合适，但批量修订时 35 条 edits 的 JSON 原样刷在聊天区占两三屏，是唯一真实缺点。用户拍板「按方案 a 修改」= 结论照旧 + 指令块折叠成一行，点开可查（保留留底功能，不选"完全不显示"的方案 B）。
+
+**做法**（全部在 taskpane.js/html）：
+1. `parseBlock` 增加 `raw` 字段（命中围栏的原始 JSON 文本），8 个 parse* 包装器（edits/comments/rows/images/tables/ops/paras/cells）透传 raw；
+2. done 处理器构造 `b.blocks = [{tag,name,items,raw}×8]`；
+3. 新增 `lastAiBubble()`（取 #chatBox 最后一个 .msg.ai）与 `addBlockDisclosure(aiDiv, parts)`：有命中时往气泡追加 `<details class="blkfold">`，summary 一行「⚙ 指令明细（修订 35 条、批注 4 条）— 点开查看」，展开是灰底 `<pre class="blkraw">` 放原始 ```wps-* 块（max-height 220px 可滚动）；全部为空则不加；
+4. finishTurn 末尾（endTurn 前）调用；CSS 加 .blkfold/.blkraw；面板 ver → p25。
+
+**踩坑**：第一次实测折叠没生效——原因是多步补丁脚本中途 exit 时，`var b = {...}` 挂 `blocks` 数组的那次替换只改在内存、从未写盘（前两版脚本在 t2 MISS 后 exit(1)，第三版重写时把这段漏了）。教训：**多步字符串补丁每步成功后立即写盘并校验**，不要把两处修改攒在一个脚本里。排查手段：对比 served JS 与本地文件、检查 `blocks: [` 是否存在。
+
+**验证**：node mock 单测（parseEdits raw=65 字、summary 文案「⚙ 指令明细（修订 2 条、批注 1 条）— 点开查看」、空块不加）；真机 WPS + test-p8-merged.docx：让 agent 填第 5 行第 5/6 列（155/131）→ 气泡 = 一句话结论 + 折叠行「⚙ 指令明细（填单元格 2 条）— 点开查看」+ ✎ 两条写入报告；点击折叠行展开原始 wps-cells JSON（灰底、可横向滚动），再点收起。文档未保存即恢复干净样本。

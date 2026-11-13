@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <meta name="ver" content="p24">
+    <meta name="ver" content="p25">
 </head>
 <script type="text/javascript" src="../js/util.js"></script>
 <script type="text/javascript" src="../js/taskpane.js"></script>
@@ -581,7 +581,18 @@
         border-color: #8fb3ff;
     }
 
-    .autoTip {
+    
+/* wps-* 指令块折叠（方案 A）：默认只显示一行明细，点开看原始 JSON */
+.blkfold { margin: 6px 0 0; font-size: 11.5px; color: var(--muted); }
+.blkfold summary { cursor: pointer; user-select: none; outline: none; }
+.blkfold summary:hover { color: var(--accent); }
+.blkfold .blkraw {
+    margin: 6px 0 0; padding: 8px; max-height: 220px; overflow: auto;
+    background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px;
+    font-size: 10.5px; line-height: 1.45; white-space: pre; color: #444;
+}
+
+.autoTip {
         flex: 1 1 auto;
         min-width: 0;
         font-size: 11.6px;
