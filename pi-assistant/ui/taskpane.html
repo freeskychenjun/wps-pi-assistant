@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <meta name="ver" content="p20">
+    <meta name="ver" content="p24">
 </head>
 <script type="text/javascript" src="../js/util.js"></script>
 <script type="text/javascript" src="../js/taskpane.js"></script>
@@ -24,7 +24,8 @@
         <!-- 配置区：默认折叠，只占一行 -->
         <section class="cfgwrap">
             <div class="cfgbar">
-                <a href="javascript:void(0)" onclick="toggleCfg()" id="cfgToggle" class="link">▸ 模型配置</a>
+                <a href="javascript:void(0)" onclick="toggleCfg()" id="cfgToggle" class="link">▸ 模型</a>
+                <span id="cfgCurModel" class="cfgcur"></span>
                 <span class="cfgbar-right">
                     <a href="javascript:void(0)" onclick="newChat()" class="link">新对话</a>
                     <a href="javascript:void(0)" onclick="showSessionList()" class="link">历史</a>
@@ -32,15 +33,23 @@
                 </span>
             </div>
             <div id="cfgBox" class="cfgbox" style="display:none">
-                <label class="field"><span>provider</span>
-                    <input id="cfgProvider" placeholder="anthropic / openai / deepseek…"></label>
-                <label class="field"><span>model</span>
-                    <input id="cfgModel" placeholder="模型 ID，留空用默认"></label>
-                <label class="field"><span>API Key</span>
-                    <input id="cfgKey" type="password" placeholder="留空沿用 pi 现有配置"></label>
-                <div class="cfgfoot">
-                    <button class="btn primary sm" onclick="saveCfg()">保存并启动</button>
-                    <span id="cfgMsg" class="cfgmsg"></span>
+                <div class="modelrow">
+                    <select id="cfgSel" title="下面列出 pi 里已配置好的模型（provider 有凭据的排前面）"></select>
+                    <button class="btn primary sm" onclick="applyModel()">应用</button>
+                    <button class="btn ghost sm" onclick="loadModels(true)" title="重新读取 pi --list-models">↻</button>
+                </div>
+                <div class="cfgfoot"><span id="cfgMsg" class="cfgmsg"></span></div>
+                <a href="javascript:void(0)" onclick="toggleCfgManual()" class="link muted" id="cfgManualToggle">▸ 自定义 provider / model / API Key</a>
+                <div id="cfgManual" style="display:none">
+                    <label class="field"><span>provider</span>
+                        <input id="cfgProvider" placeholder="anthropic / openai / deepseek…"></label>
+                    <label class="field"><span>model</span>
+                        <input id="cfgModel" placeholder="模型 ID，留空用默认"></label>
+                    <label class="field"><span>API Key</span>
+                        <input id="cfgKey" type="password" placeholder="留空沿用 pi 现有配置"></label>
+                    <div class="cfgfoot">
+                        <button class="btn primary sm" onclick="saveCfg()">保存并启动</button>
+                    </div>
                 </div>
             </div>
         </section>
@@ -244,6 +253,46 @@
 
     .cfgbox {
         padding: 2px 12px 11px;
+    }
+
+    /* 模型下拉：占满一行，右侧「应用 / 刷新」两个小按钮 */
+    .modelrow {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .modelrow select {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 29px;
+        padding: 0 6px;
+        font-size: 12.5px;
+        color: var(--text);
+        background: #fff;
+        border: 1px solid #dfe3e8;
+        border-radius: 7px;
+        outline: none;
+    }
+
+    .modelrow select:focus {
+        border-color: #8fb3ff;
+        box-shadow: 0 0 0 3px rgba(47, 111, 237, .12);
+    }
+
+    .modelrow .btn {
+        flex: 0 0 auto;
+    }
+
+    /* 顶栏上的当前模型名 */
+    .cfgcur {
+        margin-left: 6px;
+        font-size: 11.5px;
+        color: var(--muted);
+        max-width: 150px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .field {

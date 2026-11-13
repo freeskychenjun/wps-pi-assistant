@@ -196,3 +196,20 @@
 - [JSAPI 功能接口列表](http://open.wps.cn/previous/docs/client/js-api/appendix/function-list)
 - [Revision 对象](http://open.wps.cn/documents/app-integration-dev/wps365/client/wpsoffice/jsapi/wps/Revision/obj)、[修订 Revisions](https://open.wps.cn/documents/app-integration-dev/docs-center/online-preview-edit/client/Word/Revisions)
 - 本仓库现有资产：`docs/borrow/`（dsh-office 借鉴台账）、三端 skill 源码（修订/锚点/快照逻辑）
+
+### P14 面板模型下拉：从 pi 已配置的模型里选（已完成 2026-11-13）
+
+**动机**：用户在面板里选模型要手填 provider/model/API Key，不方便；希望像 pi web 那样有个列表，从"已经配好的模型"里挑。
+
+**做法**：
+1. bridge 新增 `GET /models`：读 `~/.pi/agent/auth.json` 判断哪些 provider 已配 key，再跑 `pi --list-models`（5 分钟缓存，`?force=1` 强制刷新）解析出 provider/model/context/maxOut/thinking/images，已配置 provider 排前面，返回给面板；
+2. 面板顶部「▸ 模型」展开后是一个按 provider 分组的 `<select>`（组名标 `（已配置）/（未配置）`，选项文本 `model · context · 推理 · 图片`），后面是「应用」「↻」；下方保留折叠的「自定义 provider / model / API Key」旧入口；
+3. 点「应用」→ `POST /config {provider,model}` → 桥接重启 pi 子进程；选「（跟随 pi 默认模型）」则发空配置，回到 pi 默认；
+4. 标题右侧常驻「当前：模型名」（`GET /health` 每 15 秒同步一次），选择同时写 WPS PluginStorage 与 bridge-config.json。
+
+**踩坑**：
+- 面板 onload 原来会把 PluginStorage 里的配置（可能为空）无条件 POST 给 /config，导致**重启 WPS 后模型被重置成 pi 默认**；改为"本地有配置才推，否则沿用桥接已保存的配置"。
+- 面板 JS 报错原先完全静默（表现是"一直停在连接中"）——本次曾因编辑时误删 `loadModels()` 触发；现已加 `window.onerror` / `unhandledrejection` 钩子，写 `JS-ERROR …` 到 debug.log。
+- UI 自动化：旧脚本用 ALT 解锁前台会打开 WPS 菜单、后续点击被菜单吞掉；改用 `AttachThreadInput + SetForegroundWindow` 后点击/按键才可靠。截图预览 1708×961 与实际 1920×1080 有 1.124 倍率，量坐标要用裁剪放大图。
+
+**验证**：/models 返回 46 个模型、5 个 provider（4 个已配置）；面板点开下拉正常；选 deepseek-v4-pro 点「应用」→ /health model=deepseek-v4-pro、标签变「当前：deepseek-v4-pro」；重启 WPS 后仍是该模型；选「（跟随 pi 默认模型）」→ /health model=null。

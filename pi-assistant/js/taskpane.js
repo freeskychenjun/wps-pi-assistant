@@ -4,6 +4,25 @@ var MAX_CTX = 6000;      // 附带上下文最大字符数（防爆 context）
 
 function $(id) { return document.getElementById(id); }
 
+// 面板 JS 报错不要再静默：写一条到 bridge 的 debug.log，方便排查「一直卡在连接中」
+function logPanelError(what, detail) {
+    try {
+        fetch(BRIDGE + "/log", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: "JS-ERROR [" + what + "] " + detail })
+        });
+    } catch (e) {}
+}
+window.onerror = function (msg, src, line, col, err) {
+    logPanelError("onerror", msg + " @" + String(src || "").split("/").pop() + ":" + line + ":" + col + (err && err.stack ? " | " + err.stack.split("\n")[1] : ""));
+    return false;
+};
+window.addEventListener("unhandledrejection", function (ev) {
+    var r = ev && ev.reason;
+    logPanelError("promise", (r && r.message) ? r.message : String(r));
+});
+
 function addMsg(cls, text) {
     var h = $("emptyHint");
     if (h && h.style.display !== "none") h.style.display = "none";
@@ -245,7 +264,7 @@ function toggleCfg() {
     var box = $("cfgBox");
     var open = box.style.display === "none";
     box.style.display = open ? "block" : "none";
-    $("cfgToggle").textContent = open ? "▾ 模型配置" : "▸ 模型配置";
+    $("cfgToggle").textContent = open ? "▾ 模型" : "▸ 模型";
 }
 
 // ---------- 配置 ----------
@@ -264,8 +283,116 @@ function saveCfg() {
     try { window.Application.PluginStorage.setItem("pi_config", JSON.stringify(cfg)); } catch (e) {}
     $("cfgMsg").textContent = "启动中…";
     fetch(BRIDGE + "/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) })
-        .then(function () { $("cfgMsg").textContent = "已启动 ✓"; })
+        .then(function () {
+            $("cfgMsg").textContent = "已启动 ✓";
+            setTimeout(updateModelLabel, 1200);
+        })
         .catch(function (e) { $("cfgMsg").textContent = "桥接连不上: " + e; });
+}
+
+// ---------- 模型列表：把 pi 里已配置好的模型做成下拉，选完点「应用」 ----------
+var gModels = null;   // GET /models 的返回
+
+function modelKey(p, m) { return p + "||" + m; }
+
+function syncSelectTo(p, m) {
+    var sel = $("cfgSel");
+    if (!sel) return;
+    if (!p || !m) { sel.value = "__default__"; return; }
+    var v = modelKey(p, m);
+    for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === v) { sel.value = v; return; }
+    }
+}
+
+function fillModelSelect() {
+    var sel = $("cfgSel");
+    if (!sel) return;
+    if (!gModels || !gModels.models || !gModels.models.length) {
+        sel.innerHTML = '<option value="">（读不到模型列表，点 ↻ 重试）</option>';
+        return;
+    }
+    var cur = gModels.current || {};
+    var groups = {}, order = [];
+    for (var i = 0; i < gModels.models.length; i++) {
+        var it = gModels.models[i];
+        if (!groups[it.provider]) { groups[it.provider] = []; order.push(it.provider); }
+        groups[it.provider].push(it);
+    }
+    var html = ['<option value="__default__">（跟随 pi 默认模型）</option>'];
+    for (var g = 0; g < order.length; g++) {
+        var pid = order[g], arr = groups[pid], conf = !!arr[0].configured;
+        html.push('<optgroup label="' + escHtml(pid) + (conf ? "（已配置）" : "（未配置）") + '">');
+        for (var k = 0; k < arr.length; k++) {
+            var m = arr[k];
+            var txt = m.model + " · " + m.context + (m.thinking ? " · 推理" : "") + (m.images ? " · 图片" : "");
+            var selAttr = (cur.provider === m.provider && cur.model === m.model) ? " selected" : "";
+            html.push('<option value="' + escHtml(modelKey(m.provider, m.model)) + '"' + selAttr + '>' + escHtml(txt) + "</option>");
+        }
+        html.push("</optgroup>");
+    }
+    sel.innerHTML = html.join("");
+    if (cur.provider && cur.model) syncSelectTo(cur.provider, cur.model);
+    else sel.value = "__default__";
+}
+
+function loadModels(force) {
+    var sel = $("cfgSel");
+    if (sel && !sel.options.length) sel.innerHTML = '<option value="">正在读取模型列表…</option>';
+    fetch(BRIDGE + "/models" + (force ? "?force=1" : ""))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) throw new Error("bridge 没返回模型列表");
+            gModels = d;
+            fillModelSelect();
+            var nCfg = 0;
+            for (var i = 0; i < d.models.length; i++) if (d.models[i].configured) nCfg++;
+            $("cfgMsg").textContent = "共 " + d.models.length + " 个模型，其中 " + nCfg + " 个已配置";
+        })
+        .catch(function (e) { $("cfgMsg").textContent = "读模型列表失败：" + e; });
+}
+
+function applyModel() {
+    var sel = $("cfgSel");
+    if (!sel || !sel.value) { $("cfgMsg").textContent = "先选一个模型"; return; }
+    var cfg;
+    if (sel.value === "__default__") {
+        cfg = {};
+    } else {
+        var v = sel.value.split("||");
+        cfg = { provider: v[0], model: v[1] };
+    }
+    try { window.Application.PluginStorage.setItem("pi_config", JSON.stringify(cfg)); } catch (e) {}
+    $("cfgMsg").textContent = "启动中…";
+    fetch(BRIDGE + "/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) })
+        .then(function () {
+            $("cfgMsg").textContent = "已应用 ✓";
+            setTimeout(updateModelLabel, 1200);
+        })
+        .catch(function (e) { $("cfgMsg").textContent = "桥接连不上：" + e; });
+}
+
+function updateModelLabel() {
+    fetch(BRIDGE + "/health")
+        .then(function (r) { return r.json(); })
+        .then(function (h) {
+            var el = $("cfgCurModel");
+            var full = (h && h.provider && h.model) ? (h.provider + "/" + h.model) : (h && h.model ? h.model : "");
+            if (el) {
+                el.textContent = "当前：" + ((h && h.model) ? h.model : "pi 默认");
+                el.title = full || "";
+            }
+            syncSelectTo(h && h.provider, h && h.model);
+        })
+        .catch(function () {});
+}
+
+function toggleCfgManual() {
+    var box = $("cfgManual");
+    if (!box) return;
+    var open = box.style.display === "none";
+    box.style.display = open ? "block" : "none";
+    $("cfgManualToggle").textContent = (open ? "▾" : "▸") + " 自定义 provider / model / API Key";
 }
 
 // ---------- 文档上下文 ----------
@@ -2296,6 +2423,9 @@ window.onload = function () {
     var cfg = getCfg();
     $("cfgProvider").value = cfg.provider || "";
     $("cfgModel").value = cfg.model || "";
+    loadModels(false);
+    updateModelLabel();
+    setInterval(updateModelLabel, 15000);
     $("userInput").addEventListener("keydown", function (e) {
         // 斜杠命令面板打开时：↑↓ 选择、Tab/Enter 补全、Esc 关闭
         var menuOpen = $("cmdMenu") && $("cmdMenu").style.display !== "none";
@@ -2323,10 +2453,15 @@ window.onload = function () {
         });
     }
     connectSSE();
-    // 侧栏打开即按上次配置拉起 pi（配置为空则用 pi 全局默认模型），避免"pi 未启动"卡住新手
-    fetch(BRIDGE + "/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) })
-        .then(function () { syncDoc(true); })
-        .catch(function () {});
+    // 侧栏打开时：如果本机 PluginStorage 里有上次选的模型就按它拉起 pi；
+    // 否则不要用空配置覆盖 bridge 已保存的配置（否则重启 WPS 后模型会被重置成 pi 默认）
+    if (cfg && (cfg.provider || cfg.model || cfg.apiKey)) {
+        fetch(BRIDGE + "/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) })
+            .then(function () { syncDoc(true); })
+            .catch(function () {});
+    } else {
+        syncDoc(true);
+    }
     // 轮询文档切换（WPS 的 ApiEvent 覆盖不稳定，轮询最可靠）
     setInterval(function () { syncDoc(false); }, 2000);
     // 告诉桥接「这份文档有活面板」（agent 的 doc_* 工具靠它定位），并定期续约

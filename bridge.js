@@ -468,6 +468,45 @@ async function historyFor() {
     return out;
 }
 
+// ---------- 模型列表（面板下拉用：pi 自己配置过的 provider + 全部模型） ----------
+// pi 的凭据存在 ~/.pi/agent/auth.json，provider 名就是里面的键；模型清单用 `pi --list-models` 现取（缓存 5 分钟）
+const PI_AGENT_DIR = path.join(process.env.USERPROFILE || process.env.HOME || "", ".pi", "agent");
+const PI_AUTH_FILE = path.join(PI_AGENT_DIR, "auth.json");
+let modelsCache = { at: 0, data: null };
+
+function configuredProviders() {
+    const out = [];
+    try {
+        const a = JSON.parse(fs.readFileSync(PI_AUTH_FILE, "utf8")) || {};
+        for (const k of Object.keys(a)) if (a[k]) out.push(k);
+    } catch (e) {}
+    return out;
+}
+
+function listModels(force) {
+    if (!force && modelsCache.data && Date.now() - modelsCache.at < 5 * 60 * 1000) return modelsCache.data;
+    let table = "";
+    try {
+        table = execSync("pi --list-models", { encoding: "utf8", timeout: 25000, windowsHide: true });
+    } catch (e) {
+        table = "";
+    }
+    const rows = [];
+    const lines = String(table).split(/\r?\n/);
+    for (const ln of lines) {
+        const t = ln.trim();
+        if (!t || /^provider\s+model/i.test(t)) continue;
+        const m = t.split(/\s+/);
+        if (m.length < 5) continue;
+        rows.push({
+            provider: m[0], model: m[1], context: m[2], maxOut: m[3],
+            thinking: m[4] === "yes", images: m[5] === "yes"
+        });
+    }
+    modelsCache = { at: Date.now(), data: { at: Date.now(), rows: rows, providers: configuredProviders() } };
+    return modelsCache.data;
+}
+
 // ---------- 静态文件托管（加载项 UI） ----------
 const ADDIN_DIR = path.join(__dirname, "pi-assistant");
 const MIME = {
@@ -645,6 +684,35 @@ const server = http.createServer((req, res) => {
             }
             if (req.url === "/skills") {                const list = listSkills(req.url.indexOf("force=1") >= 0);
                 return json(200, { ok: true, count: list.length, skills: list });
+            }
+            if (req.url.indexOf("/models") === 0) {
+                const d = listModels(req.url.indexOf("force=1") >= 0);
+                const cfgP = {};
+                for (const p of d.providers) cfgP[p] = true;
+                const models = d.rows.map(function (r) {
+                    return {
+                        provider: r.provider, model: r.model, context: r.context,
+                        maxOut: r.maxOut, thinking: r.thinking, images: r.images,
+                        configured: !!cfgP[r.provider]
+                    };
+                });
+                const seen = {};
+                const providers = [];
+                for (const r of d.rows) {
+                    if (seen[r.provider]) continue;
+                    seen[r.provider] = 1;
+                    providers.push({ id: r.provider, configured: !!cfgP[r.provider] });
+                }
+                providers.sort(function (a, b) {
+                    return (b.configured - a.configured) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+                });
+                return json(200, {
+                    ok: true,
+                    current: { provider: currentProvider, model: currentModel },
+                    providers: providers,
+                    models: models,
+                    cachedAt: d.at
+                });
             }
             if (req.url === "/config" && req.method === "POST") {
                 startPi(data);
