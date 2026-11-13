@@ -325,3 +325,20 @@
 **踩坑**：`if errorlevel 1 ( ... echo ... (start-bridge.ps1) ... )` 里的括号会被 cmd 当成块的结束符，报 `. was unexpected at this time.`（整段解析失败、退出码 255）→ 括号内的 echo 文案不能出现半角 `(` `)`。
 
 **验证**：杀掉桥接 → `cmd /c start-bridge.cmd` → 输出 `bridge started`、退出码 0、`/health ok:true piRunning:true`，窗口枚举里**没有**任何 bridge/cmd 窗口；`start-bridge.cmd -Show` 才会弹可见窗口；看门狗/S4U 自启本来就不产生窗口。
+### P20 看门狗任务也改成 S4U（顺便消掉每分钟的黑窗闪烁）（已完成 2026-11-14）
+
+**问题**：P18 里看门狗任务是用 `schtasks /Create /SC MINUTE` 建的，默认 `LogonType = InteractiveToken`。任务每分钟跑一次 `cmd /c watch-bridge.cmd`，在**已登录会话**里执行 → 屏幕上会闪一下控制台窗口（桥接没挂时也一样，因为探针每分钟都跑）。电池策略也随默认值变成「用电池时不启动」，笔记本拔电就看门狗失效。
+
+**做法**：`install-addin.ps1` 里看门狗改用 `Register-ScheduledTask`：
+- Action：`cmd.exe /c "<插件目录>\watch-bridge.cmd"`（带 `-WorkingDirectory`，`.cmd` 交给 cmd 执行更稳）；
+- Trigger：`New-ScheduledTaskTrigger -Once -At (now+1min) -RepetitionInterval (1 分钟)`（不传 `-RepetitionDuration` = 无限重复）；
+- Settings：`-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0 -MultipleInstances IgnoreNew`；
+- Principal：与主任务同一个 **S4U** 主体（会话 0，无窗口）。
+
+**验证**（本机实测）：
+- `Export-ScheduledTask` 显示 watchdog `LogonType: S4U`、`Command: cmd.exe`、`Arguments: /c "<插件目录>\watch-bridge.cmd"`、`DisallowStartIfOnBatteries: false`、重复间隔 `PT1M`；
+- 杀掉桥接 → `schtasks /Run /TN WPSPiAssistantBridgeWatchdog` → **4 秒**后 `/health ok:true`，新桥接 `session=0`，窗口枚举里 0 个 bridge/cmd 窗口；
+- `install-addin.ps1` 全量重跑：`publish.xml untouched`（幂等），两个任务重建成功，`[7/7] bridge check: listening`；
+- 桥接 pi 自动拉起：`piRunning=true, model=deepseek-flash`。
+
+> 结论：想升级到本版不必「重装插件」，`install-addin.cmd` 本身是幂等的（注册项不变时会打印 `publish.xml untouched`），只要重跑它让两个计划任务按新定义重建即可。

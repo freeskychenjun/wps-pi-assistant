@@ -339,7 +339,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 | 任务 | 作用 |
 |---|---|
 | `WPSPiAssistantBridge` | 登录时启动桥接。Action 是 **`node.exe` 本身**（不经 `cmd`/`start`，否则任务一结束连子进程一起被回收），Principal 用 **S4U**（进程跑在会话 0、没有可被关闭的控制台） |
-| `WPSPiAssistantBridgeWatchdog` | 每分钟跑 `watch-bridge.cmd`：3987 没监听就 `schtasks /run` 把主任务拉起来，任何原因死掉都能在 1 分钟内自愈 |
+| `WPSPiAssistantBridgeWatchdog` | 每分钟跑 `watch-bridge.cmd`：3987 没监听就 `schtasks /run` 把主任务拉起来，任何原因死掉都能在 1 分钟内自愈。同样用 **S4U**（`cmd.exe /c` + `-WindowStyle` 无关，S4U 下本来就无窗口），否则每分钟会在你屏幕上闪一下黑窗 |
 
 为什么要 S4U：用「交互式」登录类型的任务时，node 会挂着一个控制台，控制台被关（注销/关闭会话）就收到 `CTRL_CLOSE`，进程以 `0xC000013A` 自杀——表现就是「用了十几分钟桥接自己没了」。
 

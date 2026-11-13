@@ -173,7 +173,7 @@ if ($Remove -or $NoAutostart) {
 } elseif ($DryRun) {
     Write-Host ("      (dry-run) would create task: " + $TaskName + " -> " + $nodeExe + " bridge.js (S4U, no console)")
     if (Test-Path $watchdog) {
-        Write-Host ("      (dry-run) would create watchdog: " + $WatchdogName + " -> " + $watchdog + " every minute")
+        Write-Host ("      (dry-run) would create watchdog: " + $WatchdogName + " -> " + $watchdog + " every minute (S4U, no window)")
     }
 } else {
     # main task: node.exe directly as the action (cmd/start wrappers get their child
@@ -189,10 +189,15 @@ if ($Remove -or $NoAutostart) {
 
     # watchdog: Task Scheduler "restart on failure" only helps when the task itself
     # reports failure; a killed node just ends. Probe the port every minute instead.
+    # NOTE: register it with the same S4U principal as the main task. A task created
+    # by "schtasks /SC MINUTE" gets LogonType=InteractiveToken, so the .cmd would run
+    # inside the logged-on session and briefly flash a console window every minute.
     if (Test-Path $watchdog) {
-        $tr = [char]34 + $watchdog + [char]34
-        schtasks /Create /F /SC MINUTE /MO 1 /RL LIMITED /TN $WatchdogName /TR $tr | Out-Null
-        Write-Host "      created watchdog task: $WatchdogName (every minute)"
+        $wdAction = New-ScheduledTaskAction -Execute "cmd.exe" -Argument ('/c "' + $watchdog + '"') -WorkingDirectory $PSScriptRoot
+        $wdTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1)
+        $wdSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $WatchdogName -Action $wdAction -Trigger $wdTrigger -Settings $wdSettings -Principal $principal -Force | Out-Null
+        Write-Host "      created watchdog task: $WatchdogName (every minute, S4U, no window)"
     } else {
         Write-Host "      [!] watch-bridge.cmd not found - no watchdog task created." -ForegroundColor Yellow
     }
