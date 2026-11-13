@@ -16,6 +16,7 @@ authaddin.bak-*.json
 
 # ===== agent 临时工作目录（不进仓库）=====
 tmp/
+node-path.txt
 
 # ===== 调试过程产物：截图 =====
 *.png

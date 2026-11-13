@@ -2867,12 +2867,19 @@ function finishTurn(b) {
 var aiBuf = "";
 var aiDiv = null;
 var es = null;
+var esHintShown = false;
 
 function connectSSE() {
     if (es) { try { es.close(); } catch (e) {} }
     es = new EventSource(BRIDGE + "/events");
-    es.onopen = function () { $("connState").textContent = "已连接"; $("connState").className = "badge ok"; };
-    es.onerror = function () { $("connState").textContent = "桥接未运行"; $("connState").className = "badge err"; };
+    es.onopen = function () { $("connState").textContent = "已连接"; $("connState").className = "badge ok"; esHintShown = false; };
+    es.onerror = function () {
+        $("connState").textContent = "桥接未运行"; $("connState").className = "badge err";
+        if (!esHintShown) {
+            esHintShown = true;
+            addMsg("sys", "⚠ 桥接没有运行（127.0.0.1:3987 连不上）。请双击插件目录里的 start-bridge.cmd 启动；安装时选了开机自启的话，登录后会自动起。桥接恢复后本面板会自动重连。");
+        }
+    };
     es.onmessage = function (e) {
         var d;
         try { d = JSON.parse(e.data); } catch (err) { return; }

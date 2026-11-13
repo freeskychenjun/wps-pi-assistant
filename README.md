@@ -299,6 +299,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 
 同事拿到 zip 后：解压到任意位置 → 双击 `install-addin.cmd` → 重启 WPS 并信任加载项 → 打开侧栏填模型配置。
 
+### 开机自启（v0.2.10 起默认开启）
+
+`install-addin.cmd` 会顺带创建**登录时计划任务** `WPSPiAssistantBridge`：登录 Windows 后自动以无窗口方式启动桥接，同事不用每天手动双击。
+
+- 脚本：[bridge-autostart.ps1](bridge-autostart.ps1)（Node 路径取自安装时写的 `node-path.txt`，避免 PATH 问题）
+- 桥接已在跑时再触发不会起第二个（bridge.js 自己检测端口占用并退出，记 `debug.log`）
+- 关掉自启：`install-addin.cmd -NoAutostart`（重装即可不建任务），或 `install-addin.cmd -Remove`，也可在「任务计划程序」里删除 `WPSPiAssistantBridge`
+- 任务状态显示「正在运行」是正常的：启动器会一直等桥接进程，避免 Windows 杀掉子进程
+
 > 开发模式（`wpsjs debug`）仍需要 `npm i` 装 `pi-assistant/node_modules`，这只在开发机上做，不进发布包。
 
 开发方案文档就在本仓库：`docs\plugin-pi-agent-方案.md`（含需求分析、架构、协议、P0–P16 各阶段结果与踩坑记录）。

@@ -6,6 +6,7 @@
 #
 # Output: dist\wps-pi-assistant-v<version>.zip
 # Included: bridge.js, pi-doc-tools.js, doc-assistant-prompt.md, start-bridge.cmd,
+#           bridge-autostart.ps1 (logon-task launcher),
 #           install-addin.ps1/.cmd, README.md, pi-assistant production files
 #           (index.html, main.js, manifest.xml, ribbon.xml, js/, ui/, images/).
 # Excluded: pi-assistant\node_modules (71 MB, only needed by `wpsjs debug`),
@@ -50,6 +51,7 @@ $files = @(
     "doc-assistant-prompt.md",
     "start-bridge.cmd",
     "install-addin.ps1",
+    "bridge-autostart.ps1",
     "install-addin.cmd",
     "README.md",
     "pi-assistant\index.html",

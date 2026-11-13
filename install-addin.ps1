@@ -5,6 +5,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\install-addin.ps1 -DryRun   # show plan only
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\install-addin.ps1 -Remove   # unregister
 #   -Url changes the add-in address (default http://127.0.0.1:3987/addin/; dev mode: http://127.0.0.1:3889/)
+#   -NoAutostart skips creating the logon scheduled task (default: create it)
 #
 # Behaviour: backs up publish.xml (keeps the newest 5 .bak files), merges the
 #            <jspluginonline> entry idempotently, keeps other add-ins untouched,
@@ -14,11 +15,13 @@
 param(
     [switch]$Remove,
     [switch]$DryRun,
+    [switch]$NoAutostart,
     [string]$Url = "http://127.0.0.1:3987/addin/"
 )
 
 $ErrorActionPreference = "Stop"
 $Name = "pi-assistant"
+$TaskName = "WPSPiAssistantBridge"
 
 $dir  = Join-Path $env:APPDATA "kingsoft\wps\jsaddons"
 $file = Join-Path $dir "publish.xml"
@@ -34,7 +37,15 @@ function Save-Xml($doc, [string]$path) {
 }
 
 Write-Host ""
-Write-Host "[1/4] checking WPS add-in folder ..."
+Write-Host "[1/6] checking prerequisites ..."
+$nodeExePre = $null
+try { $nodeExePre = (Get-Command node -ErrorAction Stop).Source } catch {}
+$piExePre = $null
+try { $piExePre = (Get-Command pi -ErrorAction Stop).Source } catch {}
+if ($nodeExePre) { Write-Host "      node: $nodeExePre" } else { Write-Host "      [!] node NOT found in PATH - the bridge cannot start. Install Node 22+ first." -ForegroundColor Yellow }
+if ($piExePre) { Write-Host "      pi:   $piExePre" } else { Write-Host "      [!] pi NOT found in PATH - install it with: npm i -g @earendil-works/pi-coding-agent" -ForegroundColor Yellow }
+
+Write-Host "[2/6] checking WPS add-in folder ..."
 if (-not (Test-Path $dir)) {
     if ($DryRun) { Write-Host "      (dry-run) would create: $dir" }
     else { New-Item -ItemType Directory -Path $dir -Force | Out-Null; Write-Host "      created: $dir" }
@@ -42,7 +53,7 @@ if (-not (Test-Path $dir)) {
     Write-Host "      exists: $dir"
 }
 
-Write-Host "[2/4] reading publish.xml ..."
+Write-Host "[3/6] reading publish.xml ..."
 $doc = New-Object System.Xml.XmlDocument
 if (Test-Path $file) {
     try {
@@ -105,10 +116,10 @@ if ($Remove) {
     }
 }
 
-Write-Host "[3/4] change: " -NoNewline
+Write-Host "[4/6] change: " -NoNewline
 if ($action) { Write-Host $action } else { Write-Host "none (already up to date)" }
 
-Write-Host "[4/4] writing ..."
+Write-Host "[5/6] writing ..."
 if (-not $changed) {
     Write-Host "      publish.xml untouched."
 } elseif ($DryRun) {
@@ -123,6 +134,39 @@ if (-not $changed) {
     }
     Save-Xml $doc $file
     Write-Host "      written: $file"
+}
+
+
+Write-Host "[6/6] autostart (logon scheduled task) ..."
+
+$nodeExe = $null
+try { $nodeExe = (Get-Command node -ErrorAction Stop).Source } catch {}
+$launcher = Join-Path $PSScriptRoot "bridge-autostart.ps1"
+
+if ($Remove -or $NoAutostart) {
+    $has = $null
+    try { $has = schtasks /Query /TN $TaskName 2>$null } catch {}
+    if ($has) {
+        if ($DryRun) { Write-Host "      (dry-run) would delete task: $TaskName" }
+        else { schtasks /Delete /TN $TaskName /F | Out-Null; Write-Host "      deleted task: $TaskName" }
+    } else {
+        Write-Host "      no autostart task, nothing to do"
+    }
+} elseif (-not $nodeExe) {
+    Write-Host "      [!] node not found in PATH - skipping autostart." -ForegroundColor Yellow
+    Write-Host "          install Node 22+ then re-run this script (or use -NoAutostart to silence)."
+} elseif (-not (Test-Path $launcher)) {
+    Write-Host "      [!] bridge-autostart.ps1 not found next to this script - skipping autostart." -ForegroundColor Yellow
+} elseif ($DryRun) {
+    Write-Host ("      (dry-run) would create logon task: " + $TaskName + " -> powershell -File " + [char]34 + $launcher + [char]34)
+} else {
+    $nodeFile = Join-Path $PSScriptRoot "node-path.txt"
+    Set-Content -LiteralPath $nodeFile -Value $nodeExe -Encoding ASCII
+    $tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + [char]34 + $launcher + [char]34
+    schtasks /Create /F /SC ONLOGON /RL LIMITED /TN $TaskName /TR $tr | Out-Null
+    Write-Host "      created logon task: $TaskName"
+    Write-Host "      node: $nodeExe"
+    Write-Host "      (disable later: install-addin.cmd -Remove, or delete the task in Task Scheduler)"
 }
 
 Write-Host ""

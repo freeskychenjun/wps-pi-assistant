@@ -251,3 +251,28 @@
 - 读：`doc_read what=layout` 返回 1 节 + 纸型/方向/页边距/页眉页脚距 + 页眉页脚文字。
 - 写（dev_apply 直测，等价正式链路）：页眉「送审稿」→「报批稿」、页脚「2026 年 11 月」→「2026 年 12 月」（`doc.Revisions.Count` 由 0→4）；A3 横排 + 页边距 2/2/2.5/2.5 → 42.00×29.70；A4 纵向 2.5 边距 → 21.00×29.70（修完后正确）；`wps-format` body 仿宋_GB2312 12pt + 两端对齐 + 1.5 倍行距 + 首行缩进 2 字 → 第 2/3/4/17 段全部生效，标题与表格未动；锚点段黑体 14pt 加粗生效。
 - 写（真实 agent 路径，经 /prompt → agent 输出代码块 → 面板执行）：①「把页眉里的「报批稿」改成「审定稿」，页脚改成…」→ agent 先 `doc_read what=layout`，判断页脚已是目标文本只改页眉，输出 `wps-headerfooter`，文档页眉变「（审定稿）」；②「正文统一仿宋小四、两端对齐、1.5 倍行距、首行缩进 2 字」→ 输出 `wps-format`，重置为宋体五号后再跑，确认 4 段全部改回目标格式；③「页面改成 A4 纵向、页边距 2.5」→ 输出 `wps-page`，实测 21.00×29.70、四边 2.50（首测暴露方向/尺寸错位 bug，修后复测通过）。
+
+### P17 开机自启（登录计划任务 + 无窗口启动器）（已完成 2026-11-13）
+
+**动机**：分发给同事后，桥接是面板的前提；之前流程是「双击 install-addin.cmd 起一次」，重启电脑就失效，非技术同事很难自查（面板只显示「桥接未运行」）。
+
+**做法**：
+1. `install-addin.ps1` 增加 `-NoAutostart` 开关（默认建任务），安装时探测 `node` / `pi` 并在控制台给出前置缺失提示；把 `node` 绝对路径写进 `node-path.txt`（gitignore）。
+2. 创建**登录时**计划任务 `WPSPiAssistantBridge`：`schtasks /Create /F /SC ONLOGON /RL LIMITED /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File <dir>\bridge-autostart.ps1"`。
+3. 新文件 `bridge-autostart.ps1`（纯 ASCII）：读 `node-path.txt` → `Set-Location` 到插件目录 → `& node bridge.js` **前台等待**。等桥接是因为 **Task Scheduler 在任务主进程退出时会杀掉整棵进程树**；等待让它保持存活（任务状态显示「正在运行」属正常）。
+4. 面板兜底：SSE `onerror` 时除了把角标改成「桥接未运行」，还在对话里提示一次「双击 start-bridge.cmd / 自启是否在跑」，恢复后自动重连。
+5. `bridge.js` 补 `server.on("error")`：端口被占（EADDRINUSE）写 `debug.log` 并 `exit(1)`，避免自启场景静默崩掉。
+6. `-Remove` 时 `schtasks /Delete` 一并删除任务；发布包白名单加入 `bridge-autostart.ps1`。
+
+**踩坑**：
+- 最初用 VBS 包一层（`wscript bridge-hidden.vbs` → `Shell.Run(cmd,0,False)`）→ 任务日志显示桥接起过又消失：任务主进程（wscript）立即退出，Windows 把整棵进程树杀掉。改为 PowerShell 前台等待后解决。
+- `.vbs` 被 VBScript 引擎按 **ANSI** 读取，文件里不能有中文（本机路径里的中文写进脚本会变成"路径未找到"）；教训：自启链路一律纯 ASCII + 文件内不硬编码中文路径，路径用 `$PSScriptRoot` 推导。
+- `schtasks /TR` 的引号在 PowerShell 里要拼 `[char]34`，否则会写成 `wscript.exe \ path \`。
+
+**验证**（本机真机）：
+- `install-addin.cmd -DryRun`：前置检查打印 node/pi 路径；`[6/6]` 打印将创建的任务命令。
+- 实际创建任务后 `schtasks /Query /V` 显示 `Task To Run: powershell.exe ... -File <dir>\bridge-autostart.ps1`、`Schedule Type: At logon time`。
+- 杀掉现有桥接 → `schtasks /Run` → 8 秒后 `/health` 返回 `ok:true piRunning:true`，进程列表只有 1 个 `node bridge.js`，**没有可见的控制台窗口**，`tmp\autostart.log` 记录启动行。
+- 重复触发任务：Windows 报「任务当前正在运行」，进程数仍为 1（幂等）。
+- 端口冲突：手动再起一个 `node bridge.js` → 进程 3 秒内以退出码 1 结束，`debug.log` 记 `bridge-listen-error EADDRINUSE ...`。
+- `install-addin.ps1 -Remove -DryRun` 输出 `would delete task: WPSPiAssistantBridge`。

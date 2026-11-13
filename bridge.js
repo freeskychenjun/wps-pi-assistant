@@ -866,3 +866,19 @@ server.listen(PORT, "127.0.0.1", () => {
         startPi(lastCfg);
     }
 });
+
+// 端口被占用等监听失败：写 debug.log 并明确退出（开机自启场景不能静默崩掉）
+server.on("error", (e) => {
+    const code = e && e.code ? e.code : "";
+    const msg = e && e.message ? e.message : String(e);
+    try {
+        fs.appendFileSync(path.join(__dirname, "debug.log"),
+            "[" + new Date().toISOString() + "] bridge-listen-error " + code + " " + msg + "\n", "utf8");
+    } catch {}
+    if (code === "EADDRINUSE") {
+        console.error("[bridge] port " + PORT + " is already in use (another bridge already running?).");
+    } else {
+        console.error("[bridge] cannot listen on 127.0.0.1:" + PORT + " - " + msg);
+    }
+    process.exit(1);
+});
