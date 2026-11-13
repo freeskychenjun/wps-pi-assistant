@@ -158,6 +158,14 @@
 - 踩坑：① PowerShell 5.1 按 ANSI 读**无 BOM** 脚本，中文注释/字符串会解析失败 → 分发脚本一律纯 ASCII；② `XmlElement.Name` 在 PowerShell 里会被解析成 `name` **属性**（大小写不敏感），判断元素名要用 `LocalName`（否则会把已有注册误判为"新增"）；③ 读取 `publish.xml` 必须用 `XmlWriter` 写 UTF-8 无 BOM，保持 WPS 能读。
 - 验证：`-DryRun` 三种分支（已注册/改地址/移除）输出正确；真实写入+备份+幂等+移除路径在备份保护下验证后已恢复原 `publish.xml`；发布包解压到空目录后能独立启动 bridge、`/health` ok、`/addin/ui/taskpane.html` 与 `/addin/js/taskpane.js` 正常返回（生产托管不依赖 node_modules）。
 
+### P12 大文档写入/撤销提速：不再「卡死」（已完成 2026-11-13）
+- 现场（用户 2026-11-13 报）：在 4081 段、13 表的设计报告上让 agent 查全文标点，回复给出 29 条 `wps-edits` + 4 条批注。面板应用期间 WPS 单核 100%、界面几分钟不响应，用户以为文档卡死。取证：文档其实没死，68 条修订 + 4 条批注都已写入内存（后来 Ctrl+S 落盘 879941 B），只是同步 COM 循环把 UI 线程占满。
+- 根因：`applyEdits` 对**每条** `find` 都 `for p=1..Paragraphs.Count` 全篇扫描（29 条 × 4081 段 ≈ 12 万次 COM 往返）；`undoLastTurn` 的文本级还原同样对每条记录全篇 `indexOf`，撤销时又卡几分钟。
+- 修法（`pi-assistant/js/taskpane.js`）：① `applyEdits` 先 `buildParaTexts(doc)` 一次读全篇段落文字，之后在本地数组里找命中段，只对命中处 `paraRangeAt()` 实时取 Range 再改；`ScreenUpdating=false`；120 秒硬超时保护；结束打印「共写入 N 处，耗时 X 秒」并 `bridgeLog`。② done 处理改成先 `setStatus("正在写入文档…")` + 大改时插一条「正在把 N 处修订写进文档…」提示，再 `setTimeout(..., 60)` 进 `finishTurn(b)`，让界面先渲染出提示。③ `undoLastTurn` 优先走 **WPS 原生「拒绝本轮修订」**（`ent.rev.from` 之前的条数保持不变，从最后一条往前 `Reject()`，最多 900 次），文字精确还原、不留残留修订；只有拒绝失败（WPS 合并了修订、条数对不上）才退回文本级还原（现在也改为一次读全篇 + 用 applyEdits 记录的 `para`/`paraText` 整段写回）。
+- 关键坑：① WPS 开着修订时 `Range.Text` **把被替换掉的旧文字也留在文本流里**（第 17 段能同时看到「1953～2021」和「1953~2021」），所以不能缓存段落起始偏移，每条命中必须实时读段落 Start；② 撤销若在修订打开状态下做「反向替换」，反向替换本身又会被记成新修订（实测 68→74 条、文字越改越长）→ 撤销期间必须 `doc.TrackRevisions = false`；③ 文本级还原后 WPS 会留下零散修订壳（实测剩 19 条孤零零的 `)`），最终改为「首选拒绝修订」后彻底消失。
+- 验证：`tmp\p12-perf.docx`（用户原稿副本，4081 段/13 表），`dev_apply` 35 条实测 **8.0～9.0 秒**（旧实现约 5 分钟），`dev_undo` **约 1.0～1.2 秒**、撤销后 `revisions=0`、全文 31516 字符与原稿一致、表格 2 表头「均值 (m3/s)」无重复括号；另有 mock 测试 `test-apply-perf.js`（11 个用例，含模拟「修订时旧文字保留」的 revKeep 模式，新旧实现最终文本完全一致）。
+- 调试入口（`handleDocReq`，仅本机脚本用）：`dev_apply`（beginTurn→applyEdits→endTurn）、`dev_revs`（列出全部修订的 type/range/text）、`dev_undo`。
+
 ## 4. 主要风险与预案
 
 | # | 风险 | 等级 | 预案 |

@@ -651,6 +651,28 @@ function handleDocReq(req) {
             endTurn();
             return { ok: true, text: devRep };
         }
+        if (kind === "dev_apply") {
+            var devEdits = req.edits || [];
+            var devT0 = (new Date()).getTime();
+            beginTurn();
+            var devRep;
+            try { devRep = applyEdits(devEdits); } finally { endTurn(); }
+            return { ok: true, text: String(devRep) + "\n[dev_apply edits=" + devEdits.length + " elapsed=" + ((new Date()).getTime() - devT0) + "ms]" };
+        }
+        if (kind === "dev_revs") {
+            var rd = window.Application.ActiveDocument;
+            if (!rd) throw new Error("当前没有打开的文档");
+            var rl = [], rcs = rd.Revisions, rcn = rcs.Count;
+            for (var ri = 1; ri <= rcn; ri++) {
+                try {
+                    var ro = rcs.Item(ri), rr = ro.Range;
+                    rl.push("#" + ri + " type=" + ro.Type + " range=" + rr.Start + ".." + rr.End +
+                        " text=" + JSON.stringify(String(rr.Text || "").slice(0, 40)) +
+                        " author=" + JSON.stringify(String(ro.Author || "")));
+                } catch (re) { rl.push("#" + ri + " ERR " + re.message); }
+            }
+            return { ok: true, text: "revisions=" + rcn + "\n" + rl.join("\n") };
+        }
         if (kind === "dev_undo") {
             undoLastTurn();
             return { ok: true, text: "undo invoked" };
@@ -1076,43 +1098,64 @@ function applyEdits(edits) {
     var revBefore = 0;
     try { doc.TrackRevisions = true; revBefore = doc.Revisions.Count; } catch (e) {}
     var applied = [];   // 实际落地的 {find, replace}，供文本级回滚
+    // 大文档上「每条 find 都全篇扫一遍」的代价极高：4081 段 × 29 条 ≈ 12 万次 COM 调用，
+    // 实测让 WPS 看起来卡死 5 分钟。改成先一次性把各段文字读进来，之后只在本地数组里找；
+    // 命中段落再单独取 Range（开着修订时替换后文字会变，偏移不能缓存）。
+    var pTexts = null;
+    var t0 = (new Date()).getTime();
+    var screenWas = null;
+    try { screenWas = app.ScreenUpdating; app.ScreenUpdating = false; } catch (e0) {}
 
     for (var i = 0; i < edits.length; i++) {
+        if ((new Date()).getTime() - t0 > 120000) {
+            report.push("⚠ 写入超过 120 秒，剩余 " + (edits.length - i) + " 条未应用（已应用的不受影响；可再发一次只补剩下的）");
+            break;
+        }
         var ed = edits[i];
         if (typeof ed.find !== "string" || !ed.find) { report.push("✗ 第" + (i + 1) + "条缺 find，跳过"); continue; }
         var mode = ed.mode || "replace";
         var hit = null, hitPara = 0, occ = 0;
         try {
-            var paras = doc.Paragraphs;
-            var n = paras.Count;
-            for (var p = 1; p <= n; p++) {
-                var rng = paras.Item(p).Range;
-                var t = rng.Text || "";
-                var c = countOccur(t, ed.find);
-                if (c > 0) {
-                    occ += c;
-                    if (!hit) {
-                        var idx = t.indexOf(ed.find);
-                        hit = doc.Range(rng.Start + idx, rng.Start + idx + ed.find.length);
-                        hitPara = p;
-                    }
-                }
+            if (!pTexts) {
+                setStatus("正在读取文档结构（大文档需要几秒）…");
+                pTexts = buildParaTexts(doc);
+                if (!pTexts) { report.push("✗ 读不到段落结构，放弃本次修订"); break; }
+                setStatus("正在写入修订…");
             }
-            if (!hit) { report.push("✗ 未找到「" + ed.find + "」，跳过"); continue; }
+            var hitAt = -1, hitOff = -1;
+            for (var p = 0; p < pTexts.length; p++) {
+                var t = pTexts[p];
+                if (!t) continue;
+                var k = t.indexOf(ed.find);
+                if (k < 0) continue;
+                occ += countOccur(t, ed.find);
+                if (hitAt < 0) { hitAt = p; hitOff = k; }
+            }
+            if (hitAt < 0) { report.push("✗ 未找到「" + ed.find + "」，跳过"); continue; }
+            // 偏移不能缓存：文档开着修订时，替换后旧文字仍留在文本流里，段落长度会变。
+            // 所以每次命中都重新取该段 Range 的实时 Start。
+            hit = paraRangeAt(doc, hitAt, hitOff, ed.find.length);
+            if (!hit) { report.push("✗ 第" + (hitAt + 1) + "段定位失败：「" + ed.find + "」"); continue; }
+            hitPara = hitAt + 1;
             var rep = (ed.replace === undefined || ed.replace === null) ? "" : String(ed.replace);
             if (mode === "insertAfter") {
-                // 在 find 所在段落之后另起一段，写入 replace（段落数 +1，后续 find 会重新扫描，索引不会错）
+                // 在 find 所在段落之后另起一段，写入 replace
                 doc.Paragraphs.Item(hitPara).Range.InsertParagraphAfter();
                 if (rep) doc.Paragraphs.Item(hitPara + 1).Range.InsertBefore(rep);
                 applied.push({ find: ed.find, replace: rep, mode: "insertAfter" });
                 report.push("✓ 在第" + hitPara + "段后插入新段落：" + (rep.length > 30 ? rep.slice(0, 30) + "…" : rep) + (ed.reason ? "　" + ed.reason : ""));
+                pTexts = null;   // 段落数变了，后面要重新读一遍
             } else if (mode === "delete") {
+                var origDel = bodyText(pTexts[hitAt]);
                 hit.Text = "";
-                applied.push({ find: ed.find, replace: "", mode: "replace" });
+                pTexts[hitAt] = paraTextAt(doc, hitAt);   // 修订模式：删除的文字仍在文本流里，按实际重读
+                applied.push({ find: ed.find, replace: "", mode: "replace", para: hitAt + 1, paraText: origDel });
                 report.push("✓ 第" + hitPara + "段：删除「" + (ed.find.length > 20 ? ed.find.slice(0, 20) + "…" : ed.find) + "」" + (ed.reason ? "　" + ed.reason : ""));
             } else {
+                var origRep = bodyText(pTexts[hitAt]);
                 hit.Text = rep;
-                applied.push({ find: ed.find, replace: rep, mode: "replace" });
+                pTexts[hitAt] = paraTextAt(doc, hitAt);   // 修订模式：旧文字不会立刻消失，按实际重读
+                applied.push({ find: ed.find, replace: rep, mode: "replace", para: hitAt + 1, paraText: origRep });
                 report.push("✓ 第" + hitPara + "段：" + (ed.reason || "") + (occ > 1 ? "　⚠ 原文出现 " + occ + " 次，只改了第一处" : ""));
             }
         } catch (e) {
@@ -1131,8 +1174,59 @@ function applyEdits(edits) {
     } else if (applied.length) {
         report.push("（改动已并入已有修订范围；点「撤销上轮AI修订」可文本级还原）");
     }
+    try { if (screenWas !== null) app.ScreenUpdating = screenWas; } catch (e8) {}
+    var secs = (((new Date()).getTime() - t0) / 1000).toFixed(1);
+    if (applied.length) report.push("（共写入 " + applied.length + " 处，耗时 " + secs + " 秒）");
+    bridgeLog("applyEdits edits=" + edits.length + " applied=" + applied.length + " secs=" + secs);
     nudgeRepaint();
     return report.join("\n");
+}
+
+// 一次性把每段文字读进来（每条 find 都全篇扫的替代方案）。
+// 4000 段大约 1.2 万次 COM 调用、十几秒；比「29 条 × 4000 段」便宜两个数量级。
+function buildParaTexts(doc) {
+    var n = 0;
+    try { n = doc.Paragraphs.Count; } catch (e0) { return null; }
+    var texts = [];
+    for (var p = 1; p <= n; p++) {
+        var tx = "";
+        try { tx = String(doc.Paragraphs.Item(p).Range.Text || ""); } catch (e1) {}
+        texts.push(tx);
+    }
+    return texts;
+}
+
+function paraTextAt(doc, p) {
+    try { return String(doc.Paragraphs.Item(p + 1).Range.Text || ""); } catch (e) { return ""; }
+}
+
+// 去掉段落文字末尾的段落标记/单元格标记，只留正文
+function bodyText(s) {
+    var t = String(s || "");
+    var cut = 0;
+    for (var i = t.length - 1; i >= 0 && cut < 3; i--) {
+        var ch = t.charAt(i);
+        if (ch === "\r" || ch === "\n" || ch === "\u0007") cut++; else break;
+    }
+    return cut ? t.slice(0, t.length - cut) : t;
+}
+
+// 取「第 p 段（0 起）第 off 位」的 Range；Start 实时读，不缓存
+function paraRangeAt(doc, p, off, len) {
+    try {
+        var r = doc.Paragraphs.Item(p + 1).Range;
+        var st = Number(r.Start) || 0;
+        return doc.Range(st + off, st + off + len);
+    } catch (e) { return null; }
+}
+
+function bridgeLog(msg) {
+    try {
+        fetch(BRIDGE + "/log", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: String(msg) })
+        });
+    } catch (e) {}
 }
 
 // ---------- 按行列号写单元格（空单元格没有 find 锚点，只能按位置写） ----------
@@ -1640,6 +1734,16 @@ function undoLastTurn() {
     undoStack.splice(idx, 1);
 
     var reverted = 0, rowsDel = 0, cmtDel = 0, unrecoverable = 0;
+    var uT0 = (new Date()).getTime();
+    var uScreen = null;
+    try { uScreen = window.Application.ScreenUpdating; window.Application.ScreenUpdating = false; } catch (e0) {}
+    // 撤销必须在「关闭修订」状态下做：否则反向替换本身又会被记成新修订，
+    // 文字越改越长、修订条数反而变多（实测 68 → 74）。
+    var uTrack = null;
+    try { uTrack = doc.TrackRevisions; doc.TrackRevisions = false; } catch (e0b) {}
+    // 全篇段落只读一次，之后每条反向改动只在本地数组里找（否则 35 条 × 4081 段又要卡几分钟）
+    var uTexts = null;
+    function uEnsure() { if (!uTexts) uTexts = buildParaTexts(doc); return uTexts; }
 
     // 说明：不用「按修订序号 Reject」来回退——WPS 会把相邻改动合并进同一条修订，
     // 序号区间一旦被合并就会连带撤销其他轮次的改动（实测会误删上一轮插入的段落）。
@@ -1683,40 +1787,106 @@ function undoLastTurn() {
         } catch (e) { unrecoverable++; }
     }
 
-    // 4) 文本级还原：按本轮记录的 find/replace 反向改回文字
-    for (var k2 = ent.edits.length - 1; k2 >= 0; k2--) {
+    // 4) 首选「按修订拒绝」：WPS 原生语义，文字能精确回到改动前，也不留空壳修订。
+    //    只有拒绝失败（WPS 把本轮改动并进了别的修订、次数对不上）才退回下面的文本级还原。
+    var rejDone = false;
+    if (ent.rev) {
+        try {
+            var wantCount = (ent.rev.from || 1) - 1;
+            var guardN = 0, curN = doc.Revisions.Count;
+            while (curN > wantCount && guardN++ < 900) {
+                doc.Revisions.Item(curN).Reject();
+                curN = doc.Revisions.Count;
+            }
+            rejDone = (curN <= wantCount);
+        } catch (erj) { rejDone = false; }
+    }
+    if (rejDone) { reverted = 0; }
+
+    // 4b) 文本级还原（兜底）：用 applyEdits 时记下的「改动前该段正文」整段写回（最干净，
+    //    也顺带把这段里的修订标记一起抹掉）；老记录没有 para/paraText 才退回按文字反查。
+    //    rejDone 为真时说明「拒绝修订」已经把文字退回去了，这一步必须跳过，否则会重复还原。
+    var restoredParas = [];
+    for (var k2 = rejDone ? -1 : ent.edits.length - 1; k2 >= 0; k2--) {
         var ed = ent.edits[k2];
         try {
+            if (ed.para && ed.paraText !== undefined) {
+                var pr = doc.Paragraphs.Item(ed.para).Range;
+                var ps = Number(pr.Start) || 0;
+                var pe = Number(pr.End) || ps;
+                var praw = String(pr.Text || "");
+                var pcut = 0;
+                for (var ci = praw.length - 1; ci >= 0 && pcut < 3; ci--) {
+                    var ch = praw.charAt(ci);
+                    if (ch === "\r" || ch === "\n" || ch === "\u0007") pcut++; else break;
+                }
+                doc.Range(ps, Math.max(ps, pe - pcut)).Text = String(ed.paraText);
+                restoredParas.push(ed.para);
+                reverted++;
+                continue;
+            }
+            var tx = uEnsure();
+            if (!tx) break;
             if (ed.mode === "insertAfter") {
                 // 撤销插入：找到文字与插入内容一致的段落，清空其文字（保留段落标记）
-                var pa = doc.Paragraphs, na = pa.Count;
                 var wantP = String(ed.replace || "").replace(/[\r\n]/g, "");
                 if (!wantP) continue;
-                for (var q = 1; q <= na; q++) {
-                    var rq = pa.Item(q).Range;
-                    var tq = String(rq.Text || "").replace(/[\r\n]/g, "");
-                    if (tq === wantP) {
-                        doc.Range(rq.Start, Math.max(rq.Start, rq.End - 1)).Text = "";
-                        reverted++;
-                        break;
-                    }
+                for (var q = 0; q < tx.length; q++) {
+                    var tq = String(tx[q] || "").replace(/[\r\n]/g, "");
+                    if (tq !== wantP) continue;
+                    var rrA = paraRangeAt(doc, q, 0, wantP.length);
+                    if (!rrA) continue;
+                    rrA.Text = "";
+                    tx[q] = paraTextAt(doc, q);
+                    reverted++;
+                    break;
                 }
                 continue;
             }
             if (ed.mode === "delete" || ed.replace === "") { unrecoverable++; continue; }   // 删除类无法按文字定位还原
-            var paras = doc.Paragraphs, n = paras.Count;
-            for (var p = 1; p <= n; p++) {
-                var rng = paras.Item(p).Range;
-                var t = rng.Text || "";
-                var ii = t.indexOf(ed.replace);
-                if (ii >= 0) {
-                    doc.Range(rng.Start + ii, rng.Start + ii + ed.replace.length).Text = ed.find;
-                    reverted++;
-                    break;
-                }
+            var repQ = String(ed.replace), hitQ = -1, offQ = -1;
+            for (var q2 = 0; q2 < tx.length; q2++) {
+                var idx2 = String(tx[q2] || "").indexOf(repQ);
+                if (idx2 >= 0) { hitQ = q2; offQ = idx2; break; }
             }
+            if (hitQ < 0) { unrecoverable++; continue; }
+            var rrB = paraRangeAt(doc, hitQ, offQ, repQ.length);
+            if (!rrB) { unrecoverable++; continue; }
+            rrB.Text = ed.find;
+            tx[hitQ] = paraTextAt(doc, hitQ);
+            reverted++;
         } catch (e) {}
     }
+    // 4.5) 清理残留修订：整段写回后，段落里可能还剩着「被删掉的旧标点」这类修订壳
+    //      （实测 68 条会剩 19 条，全是孤零零的 ")"），它们的起点还在被还原的段落里，直接拒掉。
+    var orphanRevs = 0;
+    // 区间要在「还原之后」重新取：写回会改变文档长度，写回前记的位置已经不准了。
+    var rRanges = [];
+    for (var rp = 0; rp < restoredParas.length; rp++) {
+        try {
+            var rpr = doc.Paragraphs.Item(restoredParas[rp]).Range;
+            rRanges.push([Number(rpr.Start) || 0, Number(rpr.End) || 0]);
+        } catch (erp) {}
+    }
+    try {
+        var rvs = doc.Revisions, rvn = rvs.Count;
+        for (var vv = rvn; vv >= 1; vv--) {
+            try {
+                var rvo = rvs.Item(vv);
+                var rvS = Number(rvo.Range.Start) || 0;
+                var hitR = false;
+                for (var rr2 = 0; rr2 < rRanges.length; rr2++) {
+                    if (rvS >= rRanges[rr2][0] && rvS < rRanges[rr2][1]) { hitR = true; break; }
+                }
+                var rt = String(rvo.Range.Text || "");
+                if (hitR || rt === "" || rt === "\r" || rt === "\u0007") { rvo.Reject(); orphanRevs++; }
+            } catch (ev) {}
+        }
+    } catch (err) {}
+    try { doc.TrackRevisions = uTrack; } catch (e8) {}
+    try { window.Application.ScreenUpdating = uScreen; } catch (e9) {}
+    var uSecs = Math.round(((new Date()).getTime() - uT0) / 100) / 10;
+    if (reverted || rowsDel || cmtDel || cellsBack) bridgeLog("undoLastTurn secs=" + uSecs + " text=" + reverted + " rows=" + rowsDel + " cmt=" + cmtDel + " cells=" + cellsBack);
 
     var parts = [];
     if (rowsDel) parts.push("删除表格行 " + rowsDel + " 行");
@@ -1728,7 +1898,7 @@ function undoLastTurn() {
     var left = 0;
     for (var z = 0; z < undoStack.length; z++) if (undoStack[z].docKey === ent.docKey) left++;
     addMsg("edit", parts.length
-        ? "↩ 已撤销一轮 AI 改动（" + parts.join("，") + "）" + (left ? "　还可继续撤销 " + left + " 轮" : "")
+        ? "↩ 已撤销一轮 AI 改动（" + parts.join("，") + "）" + (left ? "　还可继续撤销 " + left + " 轮" : "") + "　耗时 " + uSecs + " 秒"
         : "↩ 未能撤销（改动可能已被手动接受或删除）");
     updateUndoBtn();
     nudgeRepaint();
@@ -1893,6 +2063,54 @@ function runProbe(silent) {
     } catch (e) {}
 }
 
+// 把一轮回复里的各类改动块写进文档。拆成独立函数 + setTimeout 调用，
+// 是为了先让「正在写入…」渲染出来；以前在 done 事件里同步跑，界面看着像卡死。
+function finishTurn(b) {
+    var did = [];
+    try {
+        beginTurn();
+        if (b.parsed.edits && b.parsed.edits.length) {
+            addMsg("edit", applyEdits(b.parsed.edits));
+            did.push("修订 " + b.parsed.edits.length + " 处");
+        }
+        if (b.cmt.comments && b.cmt.comments.length) {
+            addMsg("edit", applyComments(b.cmt.comments));
+            did.push("批注 " + b.cmt.comments.length + " 条");
+        }
+        if (b.rws.rows && b.rws.rows.length) {
+            addMsg("edit", applyRows(b.rws.rows));
+            did.push("表格加行 " + b.rws.rows.length + " 行");
+        }
+        if (b.imgs.images && b.imgs.images.length) {
+            addMsg("edit", applyImages(b.imgs.images));
+            did.push("插入图片 " + b.imgs.images.length + " 张");
+        }
+        if (b.tbls.tables && b.tbls.tables.length) {
+            addMsg("edit", applyTables(b.tbls.tables));
+            did.push("新建表格 " + b.tbls.tables.length + " 个");
+        }
+        if (b.opsb.ops && b.opsb.ops.length) {
+            addMsg("edit", applyOps(b.opsb.ops));
+            did.push("表格结构调整 " + b.opsb.ops.length + " 处");
+        }
+        if (b.prb.paras && b.prb.paras.length) {
+            addMsg("edit", applyParas(b.prb.paras));
+            did.push("插入段落 " + b.prb.paras.length + " 组");
+        }
+        if (b.clb.cells && b.clb.cells.length) {
+            addMsg("edit", applyCells(b.clb.cells));
+            did.push("填写单元格 " + b.clb.cells.length + " 个");
+        }
+        endTurn();
+        setStatus(did.length ? "AI 已" + did.join("、") + "，可在「审阅」中处理" : "");
+    } catch (e) {
+        try { endTurn(); } catch (e2) {}
+        addMsg("sys", "⚠ 写入文档时出错：" + (e && e.message ? e.message : e));
+        setStatus("");
+        bridgeLog("finishTurn error: " + (e && e.message ? e.message : e));
+    }
+}
+
 // ---------- SSE ----------
 var aiBuf = "";
 var aiDiv = null;
@@ -1957,42 +2175,19 @@ function connectSSE() {
             }
             else if (clb.clean) addMsg("ai", clb.clean);
             setTitleMark(false);
-            var did = [];
-            beginTurn();
-            if (parsed.edits && parsed.edits.length) {
-                addMsg("edit", applyEdits(parsed.edits));
-                did.push("修订 " + parsed.edits.length + " 处");
+            var b = { parsed: parsed, cmt: cmt, rws: rws, imgs: imgs, tbls: tbls, opsb: opsb, prb: prb, clb: clb };
+            var nEdits = (parsed.edits || []).length;
+            var nAll = nEdits + (cmt.comments || []).length + (rws.rows || []).length + (imgs.images || []).length +
+                (tbls.tables || []).length + (opsb.ops || []).length + (prb.paras || []).length + (clb.cells || []).length;
+            if (!nAll) {
+                setStatus("");
+            } else {
+                // 先把「正在写入…」画到界面上再动手：applyEdits 是同步长任务，
+                // 大文档上不先让出一次渲染的话，看起来就像文档卡死了。
+                setStatus("正在写入文档…");
+                if (nEdits > 12) addMsg("sys", "正在把 " + nEdits + " 处修订写进文档…（大文档可能要几十秒，期间别重复发送）");
+                setTimeout(function () { finishTurn(b); }, 60);
             }
-            if (cmt.comments && cmt.comments.length) {
-                addMsg("edit", applyComments(cmt.comments));
-                did.push("批注 " + cmt.comments.length + " 条");
-            }
-            if (rws.rows && rws.rows.length) {
-                addMsg("edit", applyRows(rws.rows));
-                did.push("表格加行 " + rws.rows.length + " 行");
-            }
-            if (imgs.images && imgs.images.length) {
-                addMsg("edit", applyImages(imgs.images));
-                did.push("插入图片 " + imgs.images.length + " 张");
-            }
-            if (tbls.tables && tbls.tables.length) {
-                addMsg("edit", applyTables(tbls.tables));
-                did.push("新建表格 " + tbls.tables.length + " 个");
-            }
-            if (opsb.ops && opsb.ops.length) {
-                addMsg("edit", applyOps(opsb.ops));
-                did.push("表格结构调整 " + opsb.ops.length + " 处");
-            }
-            if (prb.paras && prb.paras.length) {
-                addMsg("edit", applyParas(prb.paras));
-                did.push("插入段落 " + prb.paras.length + " 组");
-            }
-            if (clb.cells && clb.cells.length) {
-                addMsg("edit", applyCells(clb.cells));
-                did.push("填写单元格 " + clb.cells.length + " 个");
-            }
-            endTurn();
-            setStatus(did.length ? "AI 已" + did.join("、") + "，可在「审阅」中处理" : "");
         } else if (d.type === "error") {
             addMsg("sys", "⚠ " + d.error);
             aiBuf = ""; aiDiv = null;
