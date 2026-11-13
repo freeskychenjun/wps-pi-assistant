@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <meta name="ver" content="p10">
+    <meta name="ver" content="p12">
 </head>
 <script type="text/javascript" src="../js/util.js"></script>
 <script type="text/javascript" src="../js/taskpane.js"></script>
@@ -57,11 +57,22 @@
         <!-- 输入区 -->
         <footer class="composer">
             <div id="cmdMenu" class="cmdmenu" style="display:none"></div>
+            <div id="lintBox" class="lintbox" style="display:none">
+                <div class="linthead">
+                    <span id="lintSummary" class="lintsum">体检</span>
+                    <span class="lintacts">
+                        <a href="javascript:void(0)" onclick="askAiFixLint()" class="link">交给 AI 处理</a>
+                        <a href="javascript:void(0)" onclick="hideLint()" class="link muted">关闭</a>
+                    </span>
+                </div>
+                <div id="lintList" class="lintlist"></div>
+            </div>
             <textarea id="userInput" rows="2" oninput="onInputChange(this)"
                 placeholder="说说要改什么，Ctrl+Enter 发送；输入 / 呼出技能"></textarea>
             <div class="bar">
                 <span class="autoTip" title="发送时会附上光标处的段落或表格摘要；agent 需要别的内容会自己用只读工具读取（段落/表格/大纲/全文/检索）">自动读取文档 · 光标处摘要</span>
                 <div class="btns">
+                    <button class="btn ghost sm" onclick="runLint()" title="全文体检：表/图编号、引用悬空、表名缺失、单位写法、标点、重复段落、空单元格">体检</button>
                     <button class="btn ghost" onclick="stopPi()" title="停止当前生成">停止</button>
                     <button class="btn primary" onclick="sendMsg()">发送</button>
                 </div>
@@ -583,6 +594,119 @@
         opacity: .45;
         cursor: default;
         background: #f8f9fb;
+    }
+
+    /* ---------- 全文体检结果面板 ---------- */
+    .lintbox {
+        position: absolute;
+        left: 10px;
+        right: 10px;
+        bottom: calc(100% - 4px);
+        max-height: 300px;
+        display: flex;
+        flex-direction: column;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        box-shadow: 0 10px 28px rgba(16, 24, 40, .16);
+        z-index: 61;
+        overflow: hidden;
+    }
+
+    .linthead {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 7px 10px;
+        background: #fafbfc;
+        border-bottom: 1px solid var(--line);
+    }
+
+    .lintsum {
+        flex: 1 1 auto;
+        min-width: 0;
+        font-size: 11.5px;
+        color: #4a5461;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .lintacts {
+        flex: 0 0 auto;
+        display: flex;
+        gap: 10px;
+        font-size: 11.5px;
+    }
+
+    .lintlist {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 4px;
+    }
+
+    .lintlist::-webkit-scrollbar {
+        width: 8px;
+    }
+
+    .lintlist::-webkit-scrollbar-thumb {
+        background: #dfe3e8;
+        border-radius: 4px;
+    }
+
+    .lintitem {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        padding: 4px 7px;
+        border-radius: 7px;
+        font-size: 12px;
+        line-height: 1.45;
+        color: #33383f;
+    }
+
+    .lintitem:hover {
+        background: #f6f8fb;
+    }
+
+    .lintitem .chip {
+        flex: 0 0 auto;
+        width: 16px;
+        height: 16px;
+        line-height: 16px;
+        text-align: center;
+        border-radius: 4px;
+        font-size: 10.5px;
+        color: #fff;
+        background: #9aa2ac;
+    }
+
+    .lintitem.sev2 .chip { background: #d64545; }
+    .lintitem.sev1 .chip { background: #d9822b; }
+    .lintitem.sev0 .chip { background: #9aa2ac; }
+
+    .lintitem .lm {
+        flex: 1 1 auto;
+        min-width: 0;
+        word-break: break-word;
+    }
+
+    .lintitem .ljump {
+        flex: 0 0 auto;
+        color: var(--accent);
+        text-decoration: none;
+        font-size: 11.5px;
+        white-space: nowrap;
+    }
+
+    .lintitem .ljump:hover { text-decoration: underline; }
+
+    .lintempty {
+        padding: 8px 10px;
+        font-size: 11.5px;
+        color: var(--muted);
     }
 </style>
 

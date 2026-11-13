@@ -595,6 +595,408 @@ function findText(req) {
     return hits.length ? head + "\n" + hits.join("\n") : head;
 }
 
+// ---------- 全文体检（v0.3）：只读扫描整篇，结果可在面板里点击定位 ----------
+var lastLint = null;
+
+function lintSevName(s) { return s >= 2 ? "高" : (s === 1 ? "中" : "低"); }
+
+function lintLoc(a) {
+    if (!a) return "";
+    if (a.para) return "第 " + a.para + " 段";
+    if (a.table) {
+        var s = "表格 " + a.table;
+        if (a.row && a.col) s += " 第 " + a.row + " 行第 " + a.col + " 列";
+        return s;
+    }
+    return "";
+}
+
+function lintNormLabel(s) {
+    return String(s || "").replace(/\s+/g, "").replace(/[.．－]/g, "-");
+}
+
+// 只读扫描，不碰文档；返回 {stats, issues:[{sev,rule,msg,anchor,excerpt}]}
+function lintDoc() {
+    var app = window.Application;
+    var doc = app && app.ActiveDocument;
+    if (!doc) throw new Error("当前没有打开的文档");
+    var issues = [];
+    var addIssue = function (sev, rule, msg, anchor) {
+        issues.push({ sev: sev, rule: rule, msg: msg, anchor: anchor || null });
+    };
+
+    var pc = 0, tc = 0;
+    try { pc = doc.Paragraphs.Count; } catch (e) {}
+    try { tc = doc.Tables.Count; } catch (e) {}
+
+    // 表格占的区间：用于把「表格里的段落」从正文扫描里剔掉（表格另算）
+    var tRanges = [];
+    for (var ti = 1; ti <= tc; ti++) {
+        try { var tr = doc.Tables.Item(ti).Range; tRanges.push([tr.Start, tr.End]); } catch (e) {}
+    }
+    var inTablePos = function (pos) {
+        for (var k = 0; k < tRanges.length; k++) if (pos >= tRanges[k][0] && pos < tRanges[k][1]) return true;
+        return false;
+    };
+
+    // 1) 正文段落（非空、跳过表格内）
+    var paras = [], chars = 0;
+    for (var i = 1; i <= pc; i++) {
+        var pr = null;
+        try { pr = doc.Paragraphs.Item(i).Range; } catch (e) { continue; }
+        if (!pr) continue;
+        var ps = 0;
+        try { ps = pr.Start; } catch (e) {}
+        if (tRanges.length && inTablePos(ps)) continue;
+        var t = cleanText(pr.Text);
+        chars += t.length;
+        if (t.trim()) paras.push({ i: i, s: ps, t: t });
+    }
+
+    // 2) 表名/图名（以「表/附表/图 + 编号」开头、长度较短）→ 查重复/跳号/起点
+    var CAP_RE = /^(附?\s*表|图)\s*([0-9]+(?:[.．－][0-9]+)?)/;
+    var caps = { "表": [], "图": [] };
+    var capParas = {};
+    for (var ci = 0; ci < paras.length; ci++) {
+        var ct = paras[ci].t.trim();
+        var cm = CAP_RE.exec(ct);
+        if (!cm) continue;
+        if (ct.length > 90) continue;   // 太长的多半是正文而不是图/表名
+        var ck = cm[1].indexOf("图") >= 0 ? "图" : "表";
+        caps[ck].push({ label: cm[2], para: paras[ci].i, s: paras[ci].s, text: ct });
+        capParas[paras[ci].i] = true;
+    }
+    var kinds = ["表", "图"];
+    for (var ki = 0; ki < kinds.length; ki++) {
+        var kind = kinds[ki], list = caps[kind];
+        if (!list.length) continue;
+        var seen = {}, dups = [];
+        for (var di = 0; di < list.length; di++) {
+            var lbk = lintNormLabel(list[di].label);
+            if (seen[lbk]) dups.push({ label: list[di].label, first: seen[lbk], second: list[di] });
+            else seen[lbk] = list[di];
+        }
+        for (var dj = 0; dj < dups.length; dj++) {
+            addIssue(2, kind + "编号重复", kind + " " + dups[dj].label + " 出现两次（第 "
+                + dups[dj].first.para + " 段、第 " + dups[dj].second.para + " 段）", { para: dups[dj].second.para });
+        }
+        // 只有「纯数字编号」才查跳号，避免 5-1、5-2 这类章节编号误报
+        var allInt = true, nums = [];
+        for (var n1 = 0; n1 < list.length; n1++) {
+            if (!/^[0-9]+$/.test(list[n1].label)) { allInt = false; break; }
+            nums.push(parseInt(list[n1].label, 10));
+        }
+        if (allInt && nums.length) {
+            nums.sort(function (a, b) { return a - b; });
+            var uniq = [];
+            for (var n2 = 0; n2 < nums.length; n2++) if (n2 === 0 || nums[n2] !== nums[n2 - 1]) uniq.push(nums[n2]);
+            var gaps = [];
+            for (var n3 = 1; n3 < uniq.length; n3++) {
+                for (var g = uniq[n3 - 1] + 1; g < uniq[n3]; g++) gaps.push(g);
+            }
+            if (gaps.length) {
+                addIssue(2, kind + "编号跳号", kind + "编号不连续：缺 " + kind + " "
+                    + gaps.slice(0, 6).join("、") + (gaps.length > 6 ? " 等 " + gaps.length + " 个" : ""));
+            }
+            if (uniq[0] !== 1) addIssue(1, kind + "编号起点", "第一个" + kind + "编号是 " + kind + " " + uniq[0] + "，不是从 1 开始");
+        }
+    }
+
+    // 3) 图表引用是否悬空（只认「见表 7」「如图 3-2」这类明确引用）
+    var defSet = { "表": {}, "图": {} };
+    for (var dk in caps) if (caps.hasOwnProperty(dk)) {
+        for (var dl = 0; dl < caps[dk].length; dl++) defSet[dk][lintNormLabel(caps[dk][dl].label)] = true;
+    }
+    var REF_PRE = /(见|如|参见|详见|据|根据)\s*$/;
+    var REF_RE = /(附?表|图)\s*([0-9]+(?:[.．－][0-9]+)?)/g;
+    var refMissing = {};
+    for (var rp = 0; rp < paras.length; rp++) {
+        if (capParas[paras[rp].i]) continue;
+        var rtext = paras[rp].t, rm;
+        REF_RE.lastIndex = 0;
+        while ((rm = REF_RE.exec(rtext)) !== null) {
+            var before = rtext.slice(Math.max(0, rm.index - 6), rm.index);
+            if (!REF_PRE.test(before)) continue;
+            var rk = rm[1].indexOf("图") >= 0 ? "图" : "表";
+            var rl = lintNormLabel(rm[2]);
+            if (defSet[rk][rl]) continue;
+            var key = rk + rl;
+            if (refMissing[key]) continue;
+            refMissing[key] = true;
+            addIssue(2, "引用悬空", "正文引用了 " + rk + " " + rm[2] + "（「" + rtext.slice(Math.max(0, rm.index - 8), rm.index + 12).trim()
+                + "」），但全文没有这个" + rk + "名", { para: paras[rp].i });
+        }
+    }
+
+    // 4) 每张表前面应有一段表名
+    var tStarts = [];
+    for (var tq = 1; tq <= tc; tq++) {
+        try { tStarts.push({ n: tq, s: doc.Tables.Item(tq).Range.Start }); } catch (e) {}
+    }
+    var pj = 0, lastPara = null;
+    for (var tk = 0; tk < tStarts.length; tk++) {
+        while (pj < paras.length && paras[pj].s < tStarts[tk].s) { lastPara = paras[pj]; pj++; }
+        var capTxt = lastPara ? lastPara.t.trim() : "";
+        if (!/^(附?\s*表)\s*[0-9]/.test(capTxt)) {
+            addIssue(1, "表名缺失", "表格 " + tStarts[tk].n + " 前面没有表名（上一段是「"
+                + capTxt.slice(0, 20) + "」）", { table: tStarts[tk].n });
+        }
+    }
+
+    // 4b) 有表名却没有表格（表名悬空）
+    var capList = caps["表"].slice().sort(function (a, b) { return a.s - b.s; });
+    for (var cq = 0; cq < capList.length; cq++) {
+        var capStart = capList[cq].s;
+        var capEnd = (cq + 1 < capList.length) ? capList[cq + 1].s : 1e9;
+        var hasTbl = false;
+        for (var tz = 0; tz < tStarts.length; tz++) {
+            if (tStarts[tz].s > capStart && tStarts[tz].s < capEnd) { hasTbl = true; break; }
+        }
+        if (!hasTbl) {
+            addIssue(2, "表名悬空", "「" + capList[cq].text.slice(0, 24) + "」后面没有对应的表格",
+                { para: capList[cq].para });
+        }
+    }
+
+    // 5) 中文里的英文标点 / 半角括号 / 全角空格
+    var enCount = 0, enParas = [], parenParas = [], ideoParas = [];
+    for (var pu = 0; pu < paras.length; pu++) {
+        var pt = paras[pu].t;
+        if (/[\u4e00-\u9fa5]/.test(pt)) {
+            var bad = 0;
+            for (var pc2 = 0; pc2 < pt.length; pc2++) {
+                var ch = pt.charAt(pc2);
+                if (ch !== "," && ch !== ";" && ch !== "?" && ch !== "!") continue;
+                var pv = pc2 > 0 ? pt.charAt(pc2 - 1) : "";
+                var nx = pc2 + 1 < pt.length ? pt.charAt(pc2 + 1) : "";
+                if (/[0-9]/.test(pv) && /[0-9]/.test(nx)) continue;   // 千分位，不算错
+                bad++;
+            }
+            if (bad) { enParas.push(paras[pu].i); enCount += bad; }
+        }
+        if (/[\u4e00-\u9fa5]\(/.test(pt)) parenParas.push(paras[pu].i);
+        if (pt.indexOf("\u3000") >= 0) ideoParas.push(paras[pu].i);
+    }
+    var firstFew = function (arr) { return arr.slice(0, 3).join("、"); };
+    if (enParas.length) addIssue(0, "标点", "中文段落里出现英文逗号/分号/问号等 " + enCount + " 处（第 "
+        + firstFew(enParas) + " 段）", { para: enParas[0] });
+    if (parenParas.length) addIssue(0, "标点", "中文后紧跟半角括号，共 " + parenParas.length + " 段（第 "
+        + firstFew(parenParas) + " 段）", { para: parenParas[0] });
+    if (ideoParas.length) addIssue(0, "标点", "段内出现全角空格，共 " + ideoParas.length + " 段（第 "
+        + firstFew(ideoParas) + " 段）", { para: ideoParas[0] });
+
+    // 6) 与上一段完全重复的段落（≥20 字）
+    var dupIdx = [];
+    for (var dq = 1; dq < paras.length; dq++) {
+        var cur = paras[dq].t.replace(/\s/g, ""), prev = paras[dq - 1].t.replace(/\s/g, "");
+        if (cur.length >= 20 && cur === prev) dupIdx.push(paras[dq].i);
+    }
+    if (dupIdx.length) addIssue(0, "重复段落", "有 " + dupIdx.length + " 段与上一段完全相同（第 "
+        + dupIdx.slice(0, 3).join("、") + " 段）", { para: dupIdx[0] });
+
+    // 7) 单位写法前后不一致（m3/s 与 m³/s、m2 与 m² 之类）
+    var UNIT_RE = /(万\s*m\s*[3³]|km\s*[2²]|m\s*[3³]\s*[\/／]\s*s|m\s*[2²]|m\s*[3³])/gi;
+    var unitGroups = {};
+    for (var u0 = 0; u0 < paras.length; u0++) {
+        var ut = paras[u0].t, um;
+        UNIT_RE.lastIndex = 0;
+        while ((um = UNIT_RE.exec(ut)) !== null) {
+            var raw = um[1].replace(/\s+/g, "");
+            var low = raw.toLowerCase();
+            var canon, uname;
+            if (low.indexOf("/") >= 0 || low.indexOf("／") >= 0) { canon = "flow"; uname = "流量单位"; }
+            else if (low.indexOf("万") === 0) { canon = "wan"; uname = "万方单位"; }
+            else if (low.indexOf("km") === 0) { canon = "km2"; uname = "面积单位 km²"; }
+            else if (low.indexOf("2") >= 0) { canon = "m2"; uname = "面积单位 m²"; }
+            else { canon = "m3"; uname = "体积单位 m³"; }
+            if (!unitGroups[canon]) unitGroups[canon] = { name: uname, variants: {}, first: paras[u0].i };
+            unitGroups[canon].variants[raw] = (unitGroups[canon].variants[raw] || 0) + 1;
+        }
+    }
+    for (var uk in unitGroups) if (unitGroups.hasOwnProperty(uk)) {
+        var ug = unitGroups[uk], vs = [];
+        for (var vk in ug.variants) if (ug.variants.hasOwnProperty(vk)) vs.push(vk);
+        if (vs.length > 1) {
+            var vparts = [];
+            for (var vj = 0; vj < vs.length; vj++) vparts.push("「" + vs[vj] + "」" + ug.variants[vs[vj]] + " 处");
+            addIssue(1, "单位写法", ug.name + "全文有 " + vs.length + " 种写法：" + vparts.join("、"), { para: ug.first });
+        }
+    }
+
+    // 8) 空单元格（含合并单元格统计）
+    var emptyCells = 0, mergedCells = 0;
+    for (var te = 1; te <= tc; te++) {
+        var tbl = null;
+        try { tbl = doc.Tables.Item(te); } catch (e0) { continue; }
+        var shape = null;
+        try { shape = tableShape(tbl); } catch (e1) { continue; }
+        var grid = null, empty = [];
+        for (var r = 1; r <= shape.rows; r++) {
+            var rc;
+            try { rc = rowCellsOf(tbl, r, grid); } catch (e2) { break; }
+            grid = rc.grid;
+            var cells = rc.cells || [];
+            for (var c = 0; c < cells.length; c++) {
+                if (cells[c].merged) { mergedCells++; continue; }
+                if (!String(cells[c].text || "").trim()) empty.push({ row: r, col: cells[c].col });
+            }
+        }
+        emptyCells += empty.length;
+        if (empty.length) {
+            addIssue(0, "空单元格", "表格 " + te + " 有 " + empty.length + " 个空单元格（如 第 "
+                + empty[0].row + " 行第 " + empty[0].col + " 列）", { table: te, row: empty[0].row, col: empty[0].col });
+        }
+    }
+
+    // 排序：严重度 → 位置靠前
+    issues.sort(function (a, b) {
+        if (b.sev !== a.sev) return b.sev - a.sev;
+        var pa = a.anchor && a.anchor.para ? a.anchor.para : 1e9;
+        var pb = b.anchor && b.anchor.para ? b.anchor.para : 1e9;
+        return pa - pb;
+    });
+
+    return {
+        stats: { paras: paras.length, chars: chars, tables: tc, emptyCells: emptyCells, mergedCells: mergedCells },
+        issues: issues
+    };
+}
+
+// 体检结果 → 给 agent 的纯文本
+function lintToText(r, maxItems) {
+    var i, out = [];
+    out.push("【全文体检】正文 " + r.stats.paras + " 段 / " + r.stats.chars + " 字；表格 " + r.stats.tables
+        + " 个（空单元格 " + r.stats.emptyCells + " 个）");
+    if (!r.issues.length) { out.push("未发现明显问题。"); return out.join("\n"); }
+    var hi = 0, mid = 0, lo = 0;
+    for (i = 0; i < r.issues.length; i++) {
+        if (r.issues[i].sev >= 2) hi++; else if (r.issues[i].sev === 1) mid++; else lo++;
+    }
+    out.push("问题 " + r.issues.length + " 项：高 " + hi + " / 中 " + mid + " / 低 " + lo
+        + "（按严重度排序；这些只是线索，改动前请用 doc_read 逐条核对上下文）");
+    var n = Math.min(maxItems || 30, r.issues.length);
+    for (i = 0; i < n; i++) {
+        var it = r.issues[i], loc = lintLoc(it.anchor);
+        out.push("[" + lintSevName(it.sev) + "·" + it.rule + "] " + it.msg + (loc ? "  ← " + loc : ""));
+    }
+    if (r.issues.length > n) out.push("…（共 " + r.issues.length + " 项，只列前 " + n + " 项）");
+    return out.join("\n");
+}
+
+// 面板里的体检结果面板
+function renderLint(r) {
+    lastLint = r;
+    var box = $("lintBox"), list = $("lintList"), sum = $("lintSummary");
+    if (!box || !list || !sum) return;
+    var hi = 0, mid = 0, lo = 0, i;
+    for (i = 0; i < r.issues.length; i++) {
+        if (r.issues[i].sev >= 2) hi++; else if (r.issues[i].sev === 1) mid++; else lo++;
+    }
+    sum.textContent = "体检：正文 " + r.stats.paras + " 段 / " + r.stats.chars + " 字，表格 "
+        + r.stats.tables + " 个｜高 " + hi + " · 中 " + mid + " · 低 " + lo;
+    list.innerHTML = "";
+    if (!r.issues.length) {
+        var okd = document.createElement("div");
+        okd.className = "lintempty";
+        okd.textContent = "未发现明显问题。";
+        list.appendChild(okd);
+    }
+    var shown = Math.min(r.issues.length, 80);
+    for (i = 0; i < shown; i++) {
+        (function (it) {
+            var row = document.createElement("div");
+            row.className = "lintitem sev" + it.sev;
+            var chip = document.createElement("span");
+            chip.className = "chip";
+            chip.textContent = lintSevName(it.sev);
+            row.appendChild(chip);
+            var body = document.createElement("span");
+            body.className = "lm";
+            body.textContent = "[" + it.rule + "] " + it.msg;
+            row.appendChild(body);
+            if (it.anchor) {
+                var a = document.createElement("a");
+                a.href = "javascript:void(0)";
+                a.className = "ljump";
+                a.textContent = "定位";
+                a.onclick = function () { jumpTo(it.anchor); };
+                row.appendChild(a);
+            }
+            list.appendChild(row);
+        })(r.issues[i]);
+    }
+    if (r.issues.length > shown) {
+        var more = document.createElement("div");
+        more.className = "lintempty";
+        more.textContent = "…还有 " + (r.issues.length - shown) + " 项未显示";
+        list.appendChild(more);
+    }
+    box.style.display = "block";
+}
+
+function runLint() {
+    var box = $("lintBox"), list = $("lintList"), sum = $("lintSummary");
+    if (box && list && sum) {
+        box.style.display = "block";
+        sum.textContent = "正在体检（扫描段落、表格、引用）…";
+        list.innerHTML = "";
+    }
+    setTimeout(function () {
+        var r;
+        try { r = lintDoc(); } catch (e) {
+            addMsg("sys", "体检失败：" + ((e && e.message) || e));
+            if (sum) sum.textContent = "体检失败：" + ((e && e.message) || e);
+            return;
+        }
+        renderLint(r);
+    }, 30);
+}
+
+function hideLint() {
+    var box = $("lintBox");
+    if (box) box.style.display = "none";
+}
+
+// 把体检结果交给 agent 逐条处理
+function askAiFixLint() {
+    if (!lastLint || !lastLint.issues.length) return;
+    var lines = ["我做了一次全文体检（正文 " + lastLint.stats.paras + " 段，表格 " + lastLint.stats.tables + " 个），结果如下：", ""];
+    var n = Math.min(lastLint.issues.length, 40);
+    for (var i = 0; i < n; i++) {
+        var it = lastLint.issues[i], loc = lintLoc(it.anchor);
+        lines.push((i + 1) + ". [" + lintSevName(it.sev) + "·" + it.rule + "] " + it.msg + (loc ? "（" + loc + "）" : ""));
+    }
+    if (lastLint.issues.length > n) lines.push("（共 " + lastLint.issues.length + " 项，只列前 " + n + " 项）");
+    lines.push("");
+    lines.push("请逐条核对上下文后处理：能确定的直接按修订改，拿不准的加批注说明原因；不要动与这些问题无关的内容，改之前先用 doc_read 看原文。");
+    hideLint();
+    var el = $("userInput");
+    if (el) { el.value = lines.join("\n"); autoGrow(el); onInputChange(el); }
+    sendMsg();
+}
+
+// 点击体检项 → 在文档里选中并滚动到该处
+function jumpTo(anchor) {
+    if (!anchor) return;
+    var app = window.Application, doc = app && app.ActiveDocument;
+    if (!doc) return;
+    var rng = null;
+    try {
+        if (anchor.para) rng = doc.Paragraphs.Item(anchor.para).Range;
+        else if (anchor.table) {
+            var tb = doc.Tables.Item(anchor.table);
+            rng = (anchor.row && anchor.col) ? tb.Cell(anchor.row, anchor.col).Range : tb.Range;
+        }
+    } catch (e) { addMsg("sys", "定位失败：" + ((e && e.message) || e)); return; }
+    if (!rng) return;
+    try { doc.Activate(); } catch (e1) {}
+    try { rng.Select(); } catch (e2) {
+        try { app.Selection.SetRange(rng.Start, rng.End); } catch (e3) {}
+    }
+    try { app.ActiveWindow.ScrollIntoView(rng, true); } catch (e4) {}
+    nudgeRepaint();
+}
+
 // 面板侧统一入口：bridge 转来一条读取请求
 function handleDocReq(req) {
     req = req || {};
@@ -622,6 +1024,10 @@ function handleDocReq(req) {
             throw new Error("未知读取类型：" + what);
         }
         if (kind === "find") return { ok: true, text: findText(req) };
+        if (kind === "lint") {
+            var lmax = Math.min(Math.max(req.maxItems || 30, 1), 80);
+            return { ok: true, text: lintToText(lintDoc(), lmax) };
+        }
         if (kind === "dev_cell") {
             var dd = window.Application.ActiveDocument;
             if (!dd) throw new Error("当前没有打开的文档");
