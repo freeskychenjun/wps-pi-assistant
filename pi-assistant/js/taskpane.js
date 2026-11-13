@@ -9,11 +9,103 @@ function addMsg(cls, text) {
     if (h && h.style.display !== "none") h.style.display = "none";
     var d = document.createElement("div");
     d.className = "msg " + cls;
-    d.textContent = text;
+    // agent 的回复按 Markdown 渲染（粗体/列表/代码块/表格），其余消息保持纯文本，避免误解析
+    if (cls === "ai") {
+        d.className += " md";
+        d.innerHTML = mdToHtml(text);
+    } else {
+        d.textContent = text;
+    }
     var box = $("chatBox");
     box.appendChild(d);
     box.scrollTop = box.scrollHeight;
     return d;
+}
+
+// ---------- 轻量 Markdown → HTML（只用于 agent 回复气泡，先转义再解析，不引第三方库） ----------
+function mdInline(s) {
+    s = escHtml(s);
+    s = s.replace(/`([^`\n]+)`/g, function (m, c) { return "<code>" + c + "</code>"; });
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+    s = s.replace(/(^|[\s（(【「>])\*([^*\n]+)\*(?=[\s。，、；：！？）)】」.!?]|$)/g, function (m, pre, c) { return pre + "<em>" + c + "</em>"; });
+    s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    return s;
+}
+
+function mdSplitRow(ln) {
+    return String(ln).trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(function (c) { return c.trim(); });
+}
+
+function mdToHtml(text) {
+    var lines = String(text == null ? "" : text).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    var out = [], i = 0;
+    while (i < lines.length) {
+        var ln = lines[i];
+        // 围栏代码块
+        if (/^\s*```/.test(ln)) {
+            i++;
+            var buf = [];
+            while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i++; }
+            i++;
+            out.push("<pre><code>" + escHtml(buf.join("\n")) + "</code></pre>");
+            continue;
+        }
+        // 表格：表头 | --- | --- |
+        if (/^\s*\|.*\|\s*$/.test(ln) && i + 1 < lines.length && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1]) && lines[i + 1].indexOf("|") >= 0) {
+            var head = mdSplitRow(ln);
+            i += 2;
+            var rows = [];
+            while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(mdSplitRow(lines[i])); i++; }
+            var th = head.map(function (c) { return "<th>" + mdInline(c) + "</th>"; }).join("");
+            var tb = rows.map(function (r) {
+                return "<tr>" + r.map(function (c) { return "<td>" + mdInline(c) + "</td>"; }).join("") + "</tr>";
+            }).join("");
+            out.push("<table><thead><tr>" + th + "</tr></thead><tbody>" + tb + "</tbody></table>");
+            continue;
+        }
+        // 标题
+        var hm = /^(#{1,6})\s+(.*)$/.exec(ln);
+        if (hm) {
+            var lv = Math.min(hm[1].length + 2, 6);
+            out.push("<h" + lv + ">" + mdInline(hm[2]) + "</h" + lv + ">");
+            i++;
+            continue;
+        }
+        // 分隔线
+        if (/^\s*(---+|\*\*\*+)\s*$/.test(ln)) { out.push("<hr>"); i++; continue; }
+        // 列表（有序 / 无序）
+        if (/^\s*([-*+]|\d+[.)])\s+/.test(ln)) {
+            var ordered = /^\s*\d+[.)]\s+/.test(ln);
+            var items = [];
+            while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
+                items.push(lines[i].replace(/^\s*([-*+]|\d+[.)])\s+/, ""));
+                i++;
+            }
+            var tg = ordered ? "ol" : "ul";
+            out.push("<" + tg + ">" + items.map(function (t) { return "<li>" + mdInline(t) + "</li>"; }).join("") + "</" + tg + ">");
+            continue;
+        }
+        // 引用
+        if (/^\s*>\s?/.test(ln)) {
+            var qs = [];
+            while (i < lines.length && /^\s*>\s?/.test(lines[i])) { qs.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
+            out.push("<blockquote>" + qs.map(mdInline).join("<br>") + "</blockquote>");
+            continue;
+        }
+        if (!ln.trim()) { i++; continue; }
+        // 普通段落：吃到空行或下一个块开始
+        var ps = [ln];
+        i++;
+        while (i < lines.length && lines[i].trim() && !/^\s*```/.test(lines[i]) &&
+               !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) &&
+               !/^\s*\|/.test(lines[i]) && !/^\s*>/.test(lines[i])) {
+            ps.push(lines[i]);
+            i++;
+        }
+        out.push("<p>" + ps.map(mdInline).join("<br>") + "</p>");
+    }
+    return out.join("");
 }
 
 // 输入框随内容长高（上限由 CSS max-height 控制）
@@ -2169,7 +2261,10 @@ function connectSSE() {
             var clb = parseCells(prb.clean);
             aiBuf = "";
             if (aiDiv) {
-                if (clb.clean && clb.clean.trim()) aiDiv.textContent = clb.clean;
+                if (clb.clean && clb.clean.trim()) {
+                    aiDiv.className = "msg ai md";
+                    aiDiv.innerHTML = mdToHtml(clb.clean);   // 流式阶段是纯文本，收尾时按 Markdown 重排一次
+                }
                 else if (aiDiv.parentNode) aiDiv.parentNode.removeChild(aiDiv);  // 工具轮次没留下文字就别留空气泡
                 aiDiv = null;
             }

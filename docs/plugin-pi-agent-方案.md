@@ -166,6 +166,13 @@
 - 验证：`tmp\p12-perf.docx`（用户原稿副本，4081 段/13 表），`dev_apply` 35 条实测 **8.0～9.0 秒**（旧实现约 5 分钟），`dev_undo` **约 1.0～1.2 秒**、撤销后 `revisions=0`、全文 31516 字符与原稿一致、表格 2 表头「均值 (m3/s)」无重复括号；另有 mock 测试 `test-apply-perf.js`（11 个用例，含模拟「修订时旧文字保留」的 revKeep 模式，新旧实现最终文本完全一致）。
 - 调试入口（`handleDocReq`，仅本机脚本用）：`dev_apply`（beginTurn→applyEdits→endTurn）、`dev_revs`（列出全部修订的 type/range/text）、`dev_undo`。
 
+### P13 面板回复按 Markdown 渲染（已完成 2026-11-13）
+- 用户反馈：右侧面板里 agent 的回复出现大量 `**` 星号，粗体/列表/表格没排版。
+- 根因：`addMsg()` 一律 `textContent = text`（纯文本）；流式与收尾也都是 `textContent`，面板从没做过 Markdown 渲染。
+- 修法（`pi-assistant/js/taskpane.js` + `ui/taskpane.html`）：① `addMsg` 里只对 `cls === "ai"` 走 `mdToHtml()` 写入 `innerHTML`（用户/sys/edit 消息仍纯文本，避免把用户写的 `**` 误当语法）；② 新增**无第三方依赖**的轻量渲染器：先 `escHtml` 再解析，支持围栏代码块、表头+`|---|` 分隔行的表格、`#`~`######` 标题（层级 +2，最多 h6）、`---`/`***` 分隔线、有序/无序列表、`>` 引用、段落与 `<br>`，行内支持行内代码、`**粗体**`/`__粗体__`、`*斜体*`（带边界判断，避免把 `m*3` 之类误判）、`[文字](http(s)://…)` 链接（`target=_blank rel=noreferrer`）；③ 流式阶段仍是纯文本预览，`done` 时整段重排一次（`aiDiv.className="msg ai md"; innerHTML=mdToHtml(clb.clean)`）；④ CSS 给 `.msg.md` 关掉 `white-space: pre-wrap`，为 p/ul/ol/li/code/pre/table/th/td/blockquote/hr/a 补样式（代码块底色 `#f6f8fa`、`max-height:260px` 可滚，表格细边框、表头灰底）。
+- 验证：① node 单测（从 taskpane.js 切出 `escHtml/mdInline/mdToHtml` 用 `new Function` 跑）——标题/粗体/斜体/行内代码/链接/表格/代码块/引用/有序列表全部正确出标签，去掉标签后**星号残留 0**；② 真机实测（WPS 12.1.0.29690，面板 `dom.htmlVer = p20`）：发一条 Markdown 密集型测试提示，面板里二级标题加粗、粗体/斜体/行内代码/链接、三条要点列表、两行表格（带边框）、python 代码块、引用全部正常显示，无星号。
+- 备注：流式输出阶段（还没结束）仍是纯文本，结束时才重排成 Markdown；历史对话加载走同一个 `addMsg`，所以旧消息也会被重新渲染。
+
 ## 4. 主要风险与预案
 
 | # | 风险 | 等级 | 预案 |
