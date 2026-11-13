@@ -4,6 +4,10 @@
 
 不依赖 DSH，只要本机有 Node + pi 即可用。
 
+> ⚠️ **必须先启动桥接，再打开 WPS。** 反过来的话，WPS 连不上 `127.0.0.1:3987` 会**静默跳过**加载项——没有「AI 助手」选项卡，也没有任何报错。装好自启（见文末「开机自启」）后这一步自动完成。
+>
+> ⚠️ **关掉 WPS 窗口不等于退出。** WPS 会留 2 个无窗口的 `wps.exe` 残留进程，带着它们再开 WPS **不会**重新加载加载项。改代码/换版本/排查「没选项卡」时，先在任务管理器里结束**所有** `wps.exe` 再启动。
+
 > **分发给同事**：先把发布包打出来（见文末「打包发布」），对方解压到任意位置，**双击 `install-addin.cmd`** 即可——它会自动把加载项注册进 WPS 的 `publish.xml`（先备份、幂等、不影响别人已注册的其他加载项），然后启动桥接。对方机器只需：① 有 Node.js（≥18）和 `pi` 命令；② 首次在 WPS 里信任加载项；③ 在侧栏「模型配置」填自己的 provider/model/API Key（每台机器各配各的，`bridge-config.json` 不进 git）。代码里没有写死盘符或绝对路径，插件目录放哪都行（带中文、空格也可以）；技能目录 `%USERPROFILE%\.claude\skills` 是可选的，没有也能启动（只是少了那批技能）。
 
 ---
@@ -18,7 +22,7 @@
 [pi-assistant] bridge started on 127.0.0.1:3987
 ```
 
-重复双击是安全的，会提示 `already running`。
+重复双击是安全的，会提示 `already running`。启动失败时它**不会**再谎报成功，而是打印 `FAILED: nothing is listening on 127.0.0.1:3987` 并给出排查方向（端口被占 / Node 太旧 / 杀软拦截），同时把桥接自己的输出写进 `bridge.log`。
 
 > 桥接进程同时干两件事：① 管 pi 子进程、转发流式输出；② **直接托管加载项页面**（http://127.0.0.1:3987/addin/）。所以它必须在 WPS 之前或同时起来——它没起，WPS 里的「AI 助手」选项卡就打不开侧栏。
 
@@ -26,7 +30,7 @@
 
 首次加载会弹「加载项 pi-assistant（位于 http://127.0.0.1:3987/addin）首次加载，是否信任？」，点**确定**（只需一次，之后持久记住）。
 
-之后每次启动 WPS，侧栏会**自动打开**；若手动关掉了，点「AI 助手」→「打开侧栏」再叫出来。侧栏徽标显示绿色「已连接」即就绪。
+之后每次启动 WPS，侧栏会**自动打开**；若手动关掉了，点「AI 助手」→「打开侧栏」再叫出来。侧栏徽标显示绿色「已连接」即就绪；黄色「待配置模型」表示桥接通了但还没选模型；红色「桥接未运行」表示 3987 没人监听（双击 `start-bridge.cmd`）。桥接重启后徽标会自动恢复，不用重开 WPS。
 
 ### 3. 选模型（只需一次）
 
@@ -151,7 +155,32 @@
 | 模型下拉是空的 / 显示「读不到模型列表」 | 点「↻」强制刷新；确认命令行 `pi --list-models` 能列出模型（pi 装好、`~/.pi/agent/auth.json` 里有 provider 的 key）；改过桥接记得重启 |
 | 回复里露出 `**` 星号、列表/表格没排版 | v0.2.4 已修：面板现在按 Markdown 渲染 agent 回复（标题/粗体/列表/表格/代码块/引用）；重开 WPS 生效（`dom.htmlVer` 应为 p20 及以上） |
 | agent 说读不到文档 | 看 `debug.log` 的 `docreq` 行（`ok=… chars=…`）；若提示「任务窗格没有连着桥接」说明侧栏被关了，重开侧栏即可 |
+| 重启 WPS 后仍没有「AI 助手」选项卡 | 任务管理器 → 详细信息 → 结束**所有** `wps.exe`（包括「应用」里看不到的无窗口残留），再启动 WPS。WPS 会复用常驻进程，不结束它们不会重新读 `publish.xml` |
+| `start-bridge.cmd` 打印 FAILED | 它现在会真探测端口：先看窗口里的提示；再打开 `bridge.log` 看真实报错；常见是端口的旧进程没退（结束所有 `node.exe` 再试）或 Node 太旧 |
+| 徽标黄「待配置模型」/「pi 未启动」 | 桥接正常但模型没配：点「▸ 模型」选一个点「应用」。桥接重启后徽标会自动变回绿色，pi 也会自动被拉起 |
+| 想确认自启是否生效 | `schtasks /Query /TN WPSPiAssistantBridge`（状态 Running 正常）；`Get-Content bridge-watchdog.log`、`tmp\autostart.log` 有拉起记录 |
 | 端口 3987 被占 | 改 `bridge.js` 里的 PORT 和 `taskpane.js` 里的 BRIDGE 端口 |
+
+---
+
+### 自查命令（复制到 PowerShell 里跑）
+
+```powershell
+# 1) 桥接是否在监听
+Test-NetConnection 127.0.0.1 -Port 3987 -InformationLevel Quiet
+
+# 2) 桥接健康状态（piRunning / currentDoc 最能说明问题）
+(Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3987/health).Content
+
+# 3) 加载项是否注册 / 是否已信任
+Get-Content "$env:APPDATA\kingsoft\wps\jsaddons\publish.xml"
+Get-Content "$env:APPDATA\kingsoft\wps\jsaddons\authaddin.json"
+
+# 4) 是否有 WPS 残留进程（有就先全部结束，再启动 WPS）
+Get-Process wps | Select-Object Id, StartTime, MainWindowTitle
+```
+
+**判据**：侧栏自己弹出来了 = 选项卡注册成功；`/health` 里 `currentDoc` 是你正打开的文档 = 面板已连上桥接。两样都对，就不用再怀疑安装。
 
 ---
 
@@ -167,7 +196,9 @@
 | `sessions-map.json` | 文档 → 会话文件的映射（自动生成） |
 | `tool-log.json` | 每条回复用过哪些工具/技能的记录（供「历史」显示「⚙ 用过 bash」） |
 | `bridge-config.json` | 桥接记住的模型配置（有 provider/model 时自动生成，桥接重启后自动拉起 pi） |
-| `start-bridge.cmd` | 一键启动桥接（幂等） |
+| `start-bridge.cmd` | 一键启动桥接（幂等；成功/失败都会真探测端口，输出落 `bridge.log`） |
+| `watch-bridge.cmd` | 每分钟由计划任务调用：3987 没监听就重启桥接任务（看门狗，纯 ASCII） |
+| `bridge.log` / `bridge-watchdog.log` | 桥接的控制台输出 / 看门狗拉起记录（排错用，已 gitignore） |
 | `install-addin.cmd` / `install-addin.ps1` | 一键注册加载项（写 `%APPDATA%\kingsoft\wps\jsaddons\publish.xml`，自动备份、幂等合并、支持 `-Remove` 卸载、`-DryRun` 预览；`.cmd` 注册完顺手启动桥接） |
 | `pack-release.ps1` | 打发布包：`powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1` → `dist\wps-pi-assistant-v<版本>.zip`（只含生产文件，约 70 KB，不含 `node_modules`） |
 | `ui-helper.ps1` | 调试辅助：截图/点击/裁剪窗口（开发用，日常不需要） |
@@ -293,21 +324,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 # 版本号默认取最近的 git 标签，也可 -Version 0.2.2
 ```
 
-产出 `dist\wps-pi-assistant-v<版本>.zip`（约 70 KB / 22 个文件）。里面只有**生产必需**的文件：`bridge.js`、`pi-doc-tools.js`、`doc-assistant-prompt.md`、`start-bridge.cmd`、`install-addin.cmd/.ps1`、`README.md`，以及 `pi-assistant/` 的 `index.html`、`main.js`、`manifest.xml`、`ribbon.xml`、`js/`、`ui/`、`images/`。
+产出 `dist\wps-pi-assistant-v<版本>.zip`（约 70 KB / 22 个文件）。里面只有**生产必需**的文件：`bridge.js`、`pi-doc-tools.js`、`doc-assistant-prompt.md`、`start-bridge.cmd`、`watch-bridge.cmd`、`install-addin.cmd/.ps1`、`README.md`，以及 `pi-assistant/` 的 `index.html`、`main.js`、`manifest.xml`、`ribbon.xml`、`js/`、`ui/`、`images/`。
 
 **不含**：`pi-assistant/node_modules`（71 MB，只有 `wpsjs debug` 开发模式要）、`package.json`/`vite.config.js`、`sessions/`、`tmp/`、测试样本、日志、`bridge-config.json`（可能含 API Key）。脚本最后会自检：关键文件在、`node_modules` 和 `bridge-config.json` 没混进去、zip 能生成。
 
 同事拿到 zip 后：解压到任意位置 → 双击 `install-addin.cmd` → 重启 WPS 并信任加载项 → 打开侧栏填模型配置。
 
-### 开机自启（v0.2.10 起默认开启）
+### 开机自启（v0.2.10 起默认开启，v0.2.11 起改用 S4U）
 
-`install-addin.cmd` 会顺带创建**登录时计划任务** `WPSPiAssistantBridge`：登录 Windows 后自动以无窗口方式启动桥接，同事不用每天手动双击。
+`install-addin.cmd` 会顺带创建两个计划任务：
 
-- 脚本：[bridge-autostart.ps1](bridge-autostart.ps1)（Node 路径取自安装时写的 `node-path.txt`，避免 PATH 问题）
-- 桥接已在跑时再触发不会起第二个（bridge.js 自己检测端口占用并退出，记 `debug.log`）
-- 关掉自启：`install-addin.cmd -NoAutostart`（重装即可不建任务），或 `install-addin.cmd -Remove`，也可在「任务计划程序」里删除 `WPSPiAssistantBridge`
-- 任务状态显示「正在运行」是正常的：启动器会一直等桥接进程，避免 Windows 杀掉子进程
+| 任务 | 作用 |
+|---|---|
+| `WPSPiAssistantBridge` | 登录时启动桥接。Action 是 **`node.exe` 本身**（不经 `cmd`/`start`，否则任务一结束连子进程一起被回收），Principal 用 **S4U**（进程跑在会话 0、没有可被关闭的控制台） |
+| `WPSPiAssistantBridgeWatchdog` | 每分钟跑 `watch-bridge.cmd`：3987 没监听就 `schtasks /run` 把主任务拉起来，任何原因死掉都能在 1 分钟内自愈 |
 
+为什么要 S4U：用「交互式」登录类型的任务时，node 会挂着一个控制台，控制台被关（注销/关闭会话）就收到 `CTRL_CLOSE`，进程以 `0xC000013A` 自杀——表现就是「用了十几分钟桥接自己没了」。
+
+- 桥接已在跑时再触发不会起第二个（`bridge.js` 检测到端口占用会写 `debug.log` 并 `exit(1)`）
+- 关掉自启：`install-addin.cmd -NoAutostart`（重装即可不建任务）；`install-addin.cmd -Remove` 会把两个任务一起删；也可在「任务计划程序」里手动删
+- 任务状态显示「正在运行」是正常的：S4U 的 node 会一直跑
 > 开发模式（`wpsjs debug`）仍需要 `npm i` 装 `pi-assistant/node_modules`，这只在开发机上做，不进发布包。
 
 开发方案文档就在本仓库：`docs\plugin-pi-agent-方案.md`（含需求分析、架构、协议、P0–P16 各阶段结果与踩坑记录）。

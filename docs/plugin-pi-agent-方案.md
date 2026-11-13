@@ -276,3 +276,36 @@
 - 重复触发任务：Windows 报「任务当前正在运行」，进程数仍为 1（幂等）。
 - 端口冲突：手动再起一个 `node bridge.js` → 进程 3 秒内以退出码 1 结束，`debug.log` 记 `bridge-listen-error EADDRINUSE ...`。
 - `install-addin.ps1 -Remove -DryRun` 输出 `would delete task: WPSPiAssistantBridge`。
+
+### P18 装机可靠性：S4U 自启 + 看门狗 + 诚实的启动/连接反馈（已完成 2026-11-13）
+
+**动机**：同事在一台笔记本上装 v0.2.9 的实测报告（桌面《pi-assistant_安装踩坑与改进建议》）指出：注册/信任/资源全都正常，但「看不到 AI 助手选项卡」的根因是**桥接没在跑，而 WPS 静默跳过加载**；更麻烦的是桥接会「用十几分钟自己没了」。
+
+**根因（有退出码铁证）**：任务 `LastTaskResult = 3221225786 = 0xC000013A = STATUS_CONTROL_C_EXIT`。三层排掉：
+
+1. `cmd /c start ...` 派生：cmd 退出后 node 作为孙进程被任务计划器回收；
+2. 改成 Action 直接跑 `node.exe` 仍会死——Principal 是 Interactive 时 node 挂着控制台，控制台被关即收到 CTRL_CLOSE；
+3. 改 **S4U**（`New-ScheduledTaskPrincipal -LogonType S4U`）后进程 `SessionId=0`，没有可被关闭的控制台，稳定存活（跨会话 TCP 回环正常，面板 3 条 ESTABLISHED）。
+
+**做法**：
+
+1. `install-addin.ps1` 的 [6/6] 改为 `Register-ScheduledTask`：Action = `node.exe "bridge.js"` + `-WorkingDirectory`（bridge.js 依赖 cwd）、AtLogOn 触发、`-ExecutionTimeLimit 0`（不限时）、`-MultipleInstances IgnoreNew`、`-RestartCount 999 / -RestartInterval 1min`、Principal = S4U / Limited。
+2. 新增 `watch-bridge.cmd`（纯 ASCII）：node 探测 3987，不通就 `schtasks /run` 主任务并写 `bridge-watchdog.log`；安装时注册 `WPSPiAssistantBridgeWatchdog`（`/sc minute /mo 1`）。理由是任务设置里的「失败重启」只在任务判失败时生效，进程被杀属于"正常结束"，兜不住。
+3. `start-bridge.cmd` 重写：`where node` 前置检查；启动后**每 0.4 秒真探测端口、最多 6 秒**，成功才打印 started，失败打印 FAILED + 排查方向并 `pause`（旧版会谎报成功）；子进程输出重定向到 `bridge.log`（旧版 `start ... cmd /c node` 会让父进程的 stdout 管道一直挂着，被上层脚本调用时看起来"卡住"；且崩了没日志）。
+4. `bridge.js` 补 `process.on("uncaughtException")` / `process.on("unhandledRejection")` → 写 `debug.log` + `bridge.log`，不再整进程静默退出。
+5. 面板（ver p31）：徽标三态（红「桥接未运行」/ 黄「待配置模型」或「pi 未启动」/ 绿「已连接」），数据来自 `/health`；`es.onopen` 里**补发一次 `/config`**（`/config` 原本只在页面加载时发，桥接重启后 pi 不会被拉起，徽标却是绿的）；`es.onerror` 里顺手 `setTitleMark(false)`，修「断线时标题〔AI〕前缀不还原」。
+6. `install-addin.ps1` 末尾自检：TCP 连一次 3987，不通就黄色告警「WPS 会静默跳过加载项」；安装完成的下一步文案加上「先在任务管理器结束所有 wps.exe」。
+
+**验证**：
+
+- `schtasks /Query /V`：`LogonType: S4U`、`Task To Run: node.exe "bridge.js"`、`WorkingDirectory: <插件目录>`、Watchdog 为每分钟触发器；
+- 起任务后 node `SessionId=0`，`/health ok:true`；
+- 故障注入：强杀桥接 → 看门狗 15 秒内拉起（`bridge-watchdog.log` 有记录）、新进程仍 SessionId=0、`/health` 恢复；
+- `start-bridge.cmd`：已在跑→`already running`；停掉后启动→`bridge started`，`bridge.log` 有 `bridge listening on 127.0.0.1:3987`；把 `bridge.js` 改名模拟启动失败→打印 FAILED 且 `exit /b 1`；去掉 PATH 里的 node→提示 Node.js not found。
+
+**p31 面板实测（2026-11-14 00:05-00:10，test-layout.docx，WPS 12.1.0.29690）**：
+
+- 重启 WPS 后 `dom.htmlVer = p31`，WPS 控制台无新 `JS-ERROR` 行（旧的 `cfg is not defined` 已由 `getCfg()` 修复：`cfg` 原本是 `window.onload` 里的局部变量，全局辅助函数读不到）；
+- 强杀桥接：徽标 6 秒内变红「桥接未运行」，聊天区出现一条指引消息（双击 start-bridge.cmd / 自启会自动起 / 恢复后自动重连）；
+- 看门狗 30–42 秒内拉起新进程（`bridge-watchdog.log` 有记录、新进程 SessionId=0），面板 `EventSource` 自动重连、徽标回到绿色「已连接」，**无需重启 WPS**；
+- 徽标三态的数据源是 `/health`（`piRunning`），不再靠 `onopen` 无脑写绿；`es.onopen` 里补发 `/config`（仅当本机 PluginStorage 里有配置时才发；桥接侧 `/config` 会写 `debug.log` 的 `config provider=… model=…` 行，便于排查）。

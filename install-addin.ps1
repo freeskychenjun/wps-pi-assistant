@@ -7,6 +7,13 @@
 #   -Url changes the add-in address (default http://127.0.0.1:3987/addin/; dev mode: http://127.0.0.1:3889/)
 #   -NoAutostart skips creating the logon scheduled task (default: create it)
 #
+# Autostart: creates the planned task "WPSPiAssistantBridge" running node.exe
+#            directly (no cmd/start wrapper) under the S4U logon type, so the
+#            process lives in session 0 with no console that can be closed
+#            (interactive consoles die with 0xC000013A = STATUS_CONTROL_C_EXIT).
+#            A per-minute watchdog task ("WPSPiAssistantBridgeWatchdog",
+#            watch-bridge.cmd) restarts it if the port stops listening.
+#
 # Behaviour: backs up publish.xml (keeps the newest 5 .bak files), merges the
 #            <jspluginonline> entry idempotently, keeps other add-ins untouched,
 #            writes UTF-8 without BOM so WPS can read it.
@@ -22,6 +29,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Name = "pi-assistant"
 $TaskName = "WPSPiAssistantBridge"
+$WatchdogName = "WPSPiAssistantBridgeWatchdog"
 
 $dir  = Join-Path $env:APPDATA "kingsoft\wps\jsaddons"
 $file = Join-Path $dir "publish.xml"
@@ -141,32 +149,74 @@ Write-Host "[6/6] autostart (logon scheduled task) ..."
 
 $nodeExe = $null
 try { $nodeExe = (Get-Command node -ErrorAction Stop).Source } catch {}
-$launcher = Join-Path $PSScriptRoot "bridge-autostart.ps1"
+$watchdog = Join-Path $PSScriptRoot "watch-bridge.cmd"
+$hasSched = $null -ne (Get-Module -ListAvailable -Name ScheduledTasks)
+
+function Remove-TaskSafe([string]$tn) {
+    $exists = $null
+    try { $exists = schtasks /Query /TN $tn 2>$null } catch {}
+    if (-not $exists) { return $false }
+    if ($DryRun) { Write-Host "      (dry-run) would delete task: $tn"; return $true }
+    schtasks /Delete /TN $tn /F | Out-Null
+    Write-Host "      deleted task: $tn"
+    return $true
+}
 
 if ($Remove -or $NoAutostart) {
-    $has = $null
-    try { $has = schtasks /Query /TN $TaskName 2>$null } catch {}
-    if ($has) {
-        if ($DryRun) { Write-Host "      (dry-run) would delete task: $TaskName" }
-        else { schtasks /Delete /TN $TaskName /F | Out-Null; Write-Host "      deleted task: $TaskName" }
-    } else {
-        Write-Host "      no autostart task, nothing to do"
-    }
+    $null = Remove-TaskSafe $TaskName
+    $null = Remove-TaskSafe $WatchdogName
 } elseif (-not $nodeExe) {
     Write-Host "      [!] node not found in PATH - skipping autostart." -ForegroundColor Yellow
     Write-Host "          install Node 22+ then re-run this script (or use -NoAutostart to silence)."
-} elseif (-not (Test-Path $launcher)) {
-    Write-Host "      [!] bridge-autostart.ps1 not found next to this script - skipping autostart." -ForegroundColor Yellow
+} elseif (-not $hasSched) {
+    Write-Host "      [!] ScheduledTasks module not available - skipping autostart." -ForegroundColor Yellow
 } elseif ($DryRun) {
-    Write-Host ("      (dry-run) would create logon task: " + $TaskName + " -> powershell -File " + [char]34 + $launcher + [char]34)
+    Write-Host ("      (dry-run) would create task: " + $TaskName + " -> " + $nodeExe + " bridge.js (S4U, no console)")
+    if (Test-Path $watchdog) {
+        Write-Host ("      (dry-run) would create watchdog: " + $WatchdogName + " -> " + $watchdog + " every minute")
+    }
 } else {
-    $nodeFile = Join-Path $PSScriptRoot "node-path.txt"
-    Set-Content -LiteralPath $nodeFile -Value $nodeExe -Encoding ASCII
-    $tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + [char]34 + $launcher + [char]34
-    schtasks /Create /F /SC ONLOGON /RL LIMITED /TN $TaskName /TR $tr | Out-Null
-    Write-Host "      created logon task: $TaskName"
+    # main task: node.exe directly as the action (cmd/start wrappers get their child
+    # tree reaped when the wrapper exits) + S4U logon type (no interactive console,
+    # so no CTRL_CLOSE / 0xC000013A when the user logs off or closes a console).
+    $action = New-ScheduledTaskAction -Execute $nodeExe -Argument '"bridge.js"' -WorkingDirectory $PSScriptRoot
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+    $principal = New-ScheduledTaskPrincipal -UserId ($env:USERDOMAIN + "\" + $env:USERNAME) -LogonType S4U -RunLevel Limited
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Write-Host "      created logon task: $TaskName (S4U, node.exe direct)"
     Write-Host "      node: $nodeExe"
-    Write-Host "      (disable later: install-addin.cmd -Remove, or delete the task in Task Scheduler)"
+
+    # watchdog: Task Scheduler "restart on failure" only helps when the task itself
+    # reports failure; a killed node just ends. Probe the port every minute instead.
+    if (Test-Path $watchdog) {
+        $tr = [char]34 + $watchdog + [char]34
+        schtasks /Create /F /SC MINUTE /MO 1 /RL LIMITED /TN $WatchdogName /TR $tr | Out-Null
+        Write-Host "      created watchdog task: $WatchdogName (every minute)"
+    } else {
+        Write-Host "      [!] watch-bridge.cmd not found - no watchdog task created." -ForegroundColor Yellow
+    }
+    Write-Host "      (disable later: install-addin.cmd -Remove, or delete both tasks in Task Scheduler)"
+}
+
+# ---------------------------------------------------------------- self check
+# An online-hosted add-in is silently skipped by WPS when the bridge is not
+# listening: the ribbon.xml cannot be fetched and the tab simply never appears,
+# with no error anywhere. Never let install finish with a silent failure.
+if (-not $Remove) {
+    $up = $false
+    try {
+        $c = New-Object Net.Sockets.TcpClient
+        $up = $c.ConnectAsync("127.0.0.1", 3987).Wait(900)
+        try { $c.Close() } catch {}
+    } catch {}
+    if ($up) {
+        Write-Host "[7/7] bridge check: listening on 127.0.0.1:3987" -ForegroundColor Green
+    } else {
+        Write-Host "[7/7] bridge check: NOT listening on 127.0.0.1:3987" -ForegroundColor Yellow
+        Write-Host "      WPS will silently skip this add-in (no 'AI assistant' tab, no error)." -ForegroundColor Yellow
+        Write-Host "      Fix: double-click start-bridge.cmd in this folder, then open WPS." -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""
@@ -175,7 +225,9 @@ if ($DryRun) {
 } elseif ($changed) {
     Write-Host "Done. Next steps:" -ForegroundColor Green
     Write-Host "  1) make sure the bridge is running (double-click start-bridge.cmd)"
-    Write-Host "  2) restart WPS Writer; on first load click OK in the 'trust this add-in?' prompt"
+    Write-Host "  2) fully quit WPS Writer first: Task Manager -> end EVERY wps.exe (WPS keeps"
+Write-Host "     windowless helper processes; with them alive it will not reload the add-in)"
+Write-Host "     then start WPS Writer; on first load click OK in the 'trust this add-in?' prompt"
     Write-Host "  3) WPS now shows the 'AI assistant' tab -> click 'open sidebar'"
 } else {
     Write-Host "Already up to date, nothing to do."

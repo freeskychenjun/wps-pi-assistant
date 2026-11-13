@@ -37,3 +37,5 @@ desktop.ini
 tmp/*.txt
 __pycache__/
 dist/
+bridge.log
+bridge-watchdog.log

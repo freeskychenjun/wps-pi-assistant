@@ -2869,12 +2869,45 @@ var aiDiv = null;
 var es = null;
 var esHintShown = false;
 
+// 三态连接徽标：桥接未运行（红）/ 待配置或 pi 未起（黄）/ 已连接（绿）。
+// 起因：桥接重启后 piRunning 会变 false，而旧代码只在 onopen 里把徽标写成
+// 绿色「已连接」，用户以为能用，一发消息就失败（现场报告 4.1）。
+function setConn(state, text) {
+    var el = $("connState");
+    if (!el) return;
+    el.textContent = text;
+    el.className = "badge " + state;
+}
+function hasCfgSelected() {
+    var c = getCfg();
+    return !!(c && (c.provider || c.model || c.apiKey));
+}
+function refreshConn() {
+    return fetch(BRIDGE + "/health").then(function (r) { return r.json(); }).then(function (h) {
+        if (!h || !h.ok) { setConn("err", "桥接未运行"); return; }
+        if (h.piRunning) { setConn("ok", "已连接"); return; }
+        setConn("warn", hasCfgSelected() ? "pi 未启动" : "待配置模型");
+    }).catch(function () { setConn("err", "桥接未运行"); });
+}
+
 function connectSSE() {
     if (es) { try { es.close(); } catch (e) {} }
     es = new EventSource(BRIDGE + "/events");
-    es.onopen = function () { $("connState").textContent = "已连接"; $("connState").className = "badge ok"; esHintShown = false; };
+    es.onopen = function () {
+        esHintShown = false;
+        // 桥接可能刚重启（自启动/看门狗拉起）：/config 只在页面加载时发过一次，
+        // 这里补发一次（幂等），让 pi 自动复活，用户无感。
+        var c0 = getCfg();
+        if (c0 && (c0.provider || c0.model || c0.apiKey)) {
+            fetch(BRIDGE + "/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(c0) }).catch(function () {});
+        }
+        // 先按 /health 判断真实状态，而不是无脑写「已连接」
+        setTimeout(refreshConn, 400);
+    };
     es.onerror = function () {
-        $("connState").textContent = "桥接未运行"; $("connState").className = "badge err";
+        setConn("err", "桥接未运行");
+        // 断线时若正处于流式输出，标题〔AI〕前缀不会被 done 事件复位，这里兜底
+        try { setTitleMark(false); } catch (e) {}
         if (!esHintShown) {
             esHintShown = true;
             addMsg("sys", "⚠ 桥接没有运行（127.0.0.1:3987 连不上）。请双击插件目录里的 start-bridge.cmd 启动；安装时选了开机自启的话，登录后会自动起。桥接恢复后本面板会自动重连。");

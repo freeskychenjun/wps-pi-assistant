@@ -715,6 +715,11 @@ const server = http.createServer((req, res) => {
                 });
             }
             if (req.url === "/config" && req.method === "POST") {
+                try {
+                    fs.appendFileSync(path.join(__dirname, "debug.log"),
+                        "[" + new Date().toISOString() + "] config provider=" + (data.provider || "") +
+                        " model=" + (data.model || "") + " (panel reconnect or user apply)\n", "utf8");
+                } catch {}
                 startPi(data);
                 return json(200, { ok: true });
             }
@@ -882,3 +887,17 @@ server.on("error", (e) => {
     }
     process.exit(1);
 });
+
+// ---- global safety nets (report P0-5): never die silently ----------------
+// Before this, any uncaught exception killed the whole bridge and the panel
+// only showed "桥接未运行" with no clue. Log to debug.log/bridge.log and keep
+// serving other requests instead of taking the process down.
+function crashLog(what, e) {
+    const msg = "[" + new Date().toISOString() + "] " + what + ": " +
+        (e && e.stack ? e.stack : (e && e.message ? e.message : String(e)));
+    try { fs.appendFileSync(path.join(__dirname, "debug.log"), msg + "\n", "utf8"); } catch {}
+    try { fs.appendFileSync(path.join(__dirname, "bridge.log"), msg + "\n", "utf8"); } catch {}
+    try { console.error(msg); } catch {}
+}
+process.on("uncaughtException", (e) => { crashLog("uncaughtException", e); });
+process.on("unhandledRejection", (e) => { crashLog("unhandledRejection", e); });
