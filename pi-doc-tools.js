@@ -109,20 +109,22 @@ export default function docToolsExtension(pi) {
 			"读取当前 WPS 文档的具体内容（只读）。what 取值：selection=光标所在段落/选中的内容（光标在表格里时返回整张表）；" +
 			"paragraph=某一段（index 省略则光标所在段）；paragraphs=一段范围（start/end，段号为 1 起）；" +
 			'table=某张表格的整表（index 为表格序号，1 起，可用 startRow/endRow 限定行）；outline=标题大纲；' +
-			'highlights=全部高亮（突出显示）的内容，段内部分高亮用 «» 包住；all=全文（受 maxChars 限制）。' +
+			'highlights=全部高亮（突出显示）的内容，段内部分高亮用 «» 包住；' +
+			'layout=排版信息（每节的纸型/方向/页边距/页眉页脚距/分栏，以及六种页眉页脚的文字）；all=全文（受 maxChars 限制）。' +
 			'表格返回的每行以 " | " 分隔单元格，行首带行号，空单元格为空字符串。',
-		promptSnippet: "按需读取当前 WPS 文档的段落/选区/表格/大纲/全文",
+		promptSnippet: "按需读取当前 WPS 文档的段落/选区/表格/大纲/全文/高亮/排版",
 		promptGuidelines: [
 			"需要确认原文、逐字锚点、表格数值或空单元格位置时，用 doc_read 读，不要凭空编造 find 字符串。",
 			"doc_read what=table 时先用 doc_info 查表格序号；大表格用 startRow/endRow 分次读。",
 			"用户说「我高亮的/标黄的/突出显示的那几处」时，用 doc_read what=\"highlights\" 读出全部高亮内容及其位置。",
+			"要改页眉页脚、页面设置或字体段落格式之前，先用 doc_read what=\"layout\" 看现状（纸型/页边距/页眉页脚文字）。",
 		],
 		parameters: {
 			type: "object",
 			properties: {
 				what: {
 					type: "string",
-					enum: ["selection", "paragraph", "paragraphs", "table", "outline", "highlights", "all"],
+					enum: ["selection", "paragraph", "paragraphs", "table", "outline", "highlights", "layout", "all"],
 					description: "读取哪一部分",
 				},
 				index: { type: "number", description: "表格序号（what=table）或段落序号（what=paragraph），1 起；省略表示光标处" },

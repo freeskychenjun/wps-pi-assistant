@@ -227,3 +227,27 @@
 **踩坑**：第一次实测折叠没生效——原因是多步补丁脚本中途 exit 时，`var b = {...}` 挂 `blocks` 数组的那次替换只改在内存、从未写盘（前两版脚本在 t2 MISS 后 exit(1)，第三版重写时把这段漏了）。教训：**多步字符串补丁每步成功后立即写盘并校验**，不要把两处修改攒在一个脚本里。排查手段：对比 served JS 与本地文件、检查 `blocks: [` 是否存在。
 
 **验证**：node mock 单测（parseEdits raw=65 字、summary 文案「⚙ 指令明细（修订 2 条、批注 1 条）— 点开查看」、空块不加）；真机 WPS + test-p8-merged.docx：让 agent 填第 5 行第 5/6 列（155/131）→ 气泡 = 一句话结论 + 折叠行「⚙ 指令明细（填单元格 2 条）— 点开查看」+ ✎ 两条写入报告；点击折叠行展开原始 wps-cells JSON（灰底、可横向滚动），再点收起。文档未保存即恢复干净样本。
+
+### P16 页眉页脚 / 页面设置 / 段落格式：补齐排版写入（已完成 2026-11-13）
+
+**动机**：用户问「写这一侧现在具备哪些能力，例如可不可以修改页眉页脚？」。盘点后确认页眉页脚、页面设置、字体段落格式三块都是盲区（只能 doc_eval 读、不能写），用户随即要求「补页眉页脚设置、排版相关的能力」。
+
+**做法**：
+1. 读：`readLayout()` 遍历 `doc.Sections`，输出每节纸型/方向/页边距/页眉页脚距/分栏 + 六种页眉页脚文字（`Headers/Footers.Item(1|2|3)`，`Exists===false` 跳过，含域标「（含域/页码）」）；`hfPlainText()` 把域字符 `\u0013…\u0014` 归一成「[域]」；`doc_read what="layout"` 暴露给 agent。
+2. 写（三条新代码块，均开修订）：
+   - `wps-headerfooter`：`HF_PARTS` 把 header/footer/firstHeader/firstFooter/evenHeader/evenFooter 映射到 `Headers|Footers` 集合的第 1/2/3 项；`replaceInStory()` 用 `Range.Find` 命中后整段改写，失败退回 `indexOf + SetRange`；支持 `text` 整段改写与 `section` 指定节；累计 `ensureTurn().hfWrites`。
+   - `wps-page`：`PAPER_CM` 纸型表 + margins/headerDistance/footerDistance/columns；**先设 Orientation、再显式写 PageWidth/PageHeight**（见踩坑）。
+   - `wps-format`：定位优先级 `find` > `paras` > `scope`（body 跳过表格内段落与 /^(标题|Heading)/ 样式，`includeHeadings` 可放开）；字体（Name+NameFarEast/size/bold/italic/underline/color→BGR）、段落（align、spaceBefore/After、lineSpacing 五种 Rule、CharacterUnitFirstLineIndent、左右缩进、outlineLevel）；`ScreenUpdating=false` + 90 秒超时保护。
+3. 解析与渲染：`parseHFs/parsePages/parseFormats` 接入 done 处理链（clb→hfb→pgb→fmb），blocks 数组扩到 11 类（折叠行会显示「页眉页脚/页面设置/格式」条目），`finishTurn` 依次 apply 并 push 到「已完成」摘要。
+4. 调试入口：`handleDocReq` 加 `kind="dev_apply"`（把一段回复文本按正式链路跑一遍），仅本机回归脚本用。
+
+**踩坑**：
+- **WPS 换方向不换尺寸**：先写 `PageWidth/PageHeight` 再设 `Orientation`，WPS 会把尺寸按旧方向旋转，结果 `Orientation=0(纵向)` 但宽高仍是 29.7×21（A4 横放）。改成「先设方向 → 按目标纸型与方向算出短边×长边 → 最后显式写死 PageWidth/PageHeight」，并让 `readLayout` 在方向标记与宽高矛盾时**以实际宽高为准**。
+- 页眉页脚 `Range.Text` 结尾带 `\r`，`replaceInStory` 里不能整段 `Text=` 之后再拼，否则会多出空段；改用 `Find` 替换命中处。
+- 原型用 `node -e` 传含中文与双引号的字符串时，PowerShell 会吞引号 / 破坏编码（生成物变成 `{" formats:...`）→ 测试脚本一律写成 `tmp\*.js` 再 `node` 执行。
+- 面板代码改了必须**重启 WPS 进程**（p27→p28→p29 均如此）；`CloseMainWindow()` 只关窗口、进程还在，重开文档不会重载 webview，要 `Stop-Process` 全部 wps 后重开。
+
+**验证**（test-layout.docx：A4 纵向、页眉「…（送审稿）」、页脚「水文分院　2026 年 11 月」、3 段正文 + 3×3 表）：
+- 读：`doc_read what=layout` 返回 1 节 + 纸型/方向/页边距/页眉页脚距 + 页眉页脚文字。
+- 写（dev_apply 直测，等价正式链路）：页眉「送审稿」→「报批稿」、页脚「2026 年 11 月」→「2026 年 12 月」（`doc.Revisions.Count` 由 0→4）；A3 横排 + 页边距 2/2/2.5/2.5 → 42.00×29.70；A4 纵向 2.5 边距 → 21.00×29.70（修完后正确）；`wps-format` body 仿宋_GB2312 12pt + 两端对齐 + 1.5 倍行距 + 首行缩进 2 字 → 第 2/3/4/17 段全部生效，标题与表格未动；锚点段黑体 14pt 加粗生效。
+- 写（真实 agent 路径，经 /prompt → agent 输出代码块 → 面板执行）：①「把页眉里的「报批稿」改成「审定稿」，页脚改成…」→ agent 先 `doc_read what=layout`，判断页脚已是目标文本只改页眉，输出 `wps-headerfooter`，文档页眉变「（审定稿）」；②「正文统一仿宋小四、两端对齐、1.5 倍行距、首行缩进 2 字」→ 输出 `wps-format`，重置为宋体五号后再跑，确认 4 段全部改回目标格式；③「页面改成 A4 纵向、页边距 2.5」→ 输出 `wps-page`，实测 21.00×29.70、四边 2.50（首测暴露方向/尺寸错位 bug，修后复测通过）。

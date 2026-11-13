@@ -63,6 +63,9 @@
    - 「在表头「水位(m)」右侧插入一列，表头「流量(m³/s)」，数据依次 1250、980、760」
    - 「把「梅港」和「虎山」两个单元格合并」「把表头「测站」拆成 1 行 2 列」
    - 「把「外洲」这一行删掉」「把「备注」这一列删掉」「表头行加粗居中」「备注列宽设为 3 厘米」「表头跨页重复」「表格按内容自适应」
+   - 「把页眉里的「送审稿」改成「报批稿」」「页脚加上「水文分院　2026 年 12 月」」
+   - 「页面改成 A3 横向，页边距上下 2 厘米、左右 2.5 厘米」
+   - 「正文统一仿宋_GB2312 小四、1.5 倍行距、首行缩进 2 字，标题和表格别动」
    - **带技能的任务**：「用 datum-conversion 技能查出外洲站的 85 基准面修正值，然后把这一行的水位换算成 85 基准面并改进表格」
    - 「用 frequency-analysis 技能把这几年的洪峰流量排个频，结果按 频率/流量 两列加进表格」
 3. 按 **Ctrl+Enter** 或点「发送」。
@@ -89,13 +92,13 @@
 
 ## 三、它能做什么 / 不能做什么
 
-**能**：改写、润色、精简、扩写、换语气、批量替换指定文字、按指令逐段改、加批注、**改表格单元格**、**按行列号填空格子（空单元格/合并单元格表也能填）**、**给表格加整行**、**在指定段落后插入新段落**、删除指定文字、**插入本地图片（按比例缩放）**、**新建表格（表头自动加粗居中）**、**表格结构调整**（合并/拆分单元格、插入列、删除行列、表头加粗居中、列宽行高、表头跨页重复、按内容自适应）、**调用本机技能**（水文计算、资料查询、单位/基面换算等，见下）。
+**能**：改写、润色、精简、扩写、换语气、批量替换指定文字、按指令逐段改、加批注、**改表格单元格**、**按行列号填空格子（空单元格/合并单元格表也能填）**、**给表格加整行**、**在指定段落后插入新段落**、删除指定文字、**插入本地图片（按比例缩放）**、**新建表格（表头自动加粗居中）**、**表格结构调整**（合并/拆分单元格、插入列、删除行列、表头加粗居中、列宽行高、表头跨页重复、按内容自适应）、**页眉页脚改写**、**页面设置（纸型/方向/页边距/分栏）**、**段落格式（字体字号行距缩进对齐）**、**调用本机技能**（水文计算、资料查询、单位/基面换算等，见下）。
 
-**技能与工具（v2）**：pi 以 `--skill ~/.claude/skills --tools read,bash,ls,find,grep,doc_info,doc_read,doc_find` 启动，即 **100+ 个 Claude 技能 + 只读/执行工具**。典型用法是「先算/先查，再把结果写进文档」——例如查水文数据库、基面换算、排频、暴雨参数查算。调用时面板会显示灰色小字「⚙ 调用工具：bash」。system prompt 里给了节奏提示：**2～8 次工具调用属正常**，超过 10 步还没结论就先汇报进展。
+**技能与工具（v2）**：pi 以 `--skill ~/.claude/skills --tools read,bash,ls,find,grep,doc_info,doc_read,doc_find,doc_eval` 启动，即 **100+ 个 Claude 技能 + 只读/执行工具**。典型用法是「先算/先查，再把结果写进文档」——例如查水文数据库、基面换算、排频、暴雨参数查算。调用时面板会显示灰色小字「⚙ 调用工具：bash」。system prompt 里给了节奏提示：**2～8 次工具调用属正常**，超过 10 步还没结论就先汇报进展。
 
 **读文档（v0.2 新增，三个只读工具）**：读的都是**你眼前这份文档的实时内容**（面板用 WPS 接口读，不碰磁盘副本），所以不会读到过期版本：
 - `doc_info` — 概览：段落数、表格数、每张表的行列数与表头；
-- `doc_read` — 按需读：`what=selection|paragraph|paragraphs|table|outline|highlights|all`，可带 `index` / `start` / `end` / `startRow` / `endRow` / `maxChars`；读表带行号，末尾还列出「空单元格：第 r 行第 c 列…」；`highlights`（v0.2.7）返回全文**高亮（突出显示）内容**及颜色与位置，段内部分高亮用 `«»` 包住——"我标黄的那几个数据"就靠它读；
+- `doc_read` — 按需读：`what=selection|paragraph|paragraphs|table|outline|highlights|layout|all`，可带 `index` / `start` / `end` / `startRow` / `endRow` / `maxChars`；读表带行号，末尾还列出「空单元格：第 r 行第 c 列…」；`highlights`（v0.2.7）返回全文**高亮（突出显示）内容**及颜色与位置，段内部分高亮用 `«»` 包住——"我标黄的那几个数据"就靠它读；`layout`（v0.2.9）返回**每节的纸型/方向/页边距/页眉页脚距/分栏**，以及六种页眉页脚（页眉、首页页眉、偶数页页眉、页脚、首页页脚、偶数页页脚）的实际文字——改页眉页脚或版面之前先读它；
 - `doc_eval` — 自定义只读查询（v0.2.8）：agent 现场写一段只读 JSAPI 代码，读现成工具拿不到的属性（字体颜色、脚注、样式等），写入类调用会被面板拒绝；
 - `doc_find` — 全文找字：返回命中的段落号或表格位置（`maxHits` 1～50）。
 
@@ -111,12 +114,18 @@
 
 **模型下拉选择（v0.2.5）**：面板顶部的「▸ 模型」不再是三个输入框，而是一个下拉列表——把本机 `pi --list-models` 里所有模型按 provider 分组列出来，并标出哪些 provider 已经配了 key；选一个点「应用」即可切模型（桥接自动重启 pi），标题右侧实时显示「当前：模型名」。支持「（跟随 pi 默认模型）」、`↻` 强制刷新，选择跨 WPS 重启保留。`pi --list-models` 读不到时下拉会显示提示，点 `↻` 重试。
 
+**排版能力：页眉页脚 / 页面设置 / 段落格式（v0.2.9）**：这三类以前只能读不能改，现在各有一条写入通道（都走修订，改前先 `doc_read what="layout"` 读现状更稳）：
+- `wps-headerfooter` — 改页眉页脚文字：`{"hfs":[{"part":"header","find":"送审稿","replace":"报批稿"}]}`；`part` 可取 `header`/`footer`/`firstHeader`/`firstFooter`/`evenHeader`/`evenFooter`，不给 `find` 就整段改写（`text`），`section` 可只改某一节。改走**修订模式**，但**不参与「撤销上轮 AI 修订」**，回退请在「审阅」里拒绝修订。
+- `wps-page` — 纸型/方向/页边距/分栏：`{"pages":[{"paper":"A3","orientation":"landscape","margins":{"top":2,"bottom":2,"left":2.5,"right":2.5}}]}`；`paper` 支持 A3/A4/A5/B5/16K/8K/Letter/Legal，也可用 `width`+`height`（厘米）；还可给 `headerDistance`/`footerDistance`/`columns`。改完会显式写死页宽页高，避免 WPS「方向换了尺寸没换」的错位。
+- `wps-format` — 字体字号行距缩进对齐：`{"formats":[{"scope":"body","font":{"name":"仿宋_GB2312","size":12},"para":{"align":"justify","lineSpacing":1.5,"firstLineIndent":2}}]}`；定位三选一 `find`（一段原文）/`paras`（段号，如 `"3-8"`）/`scope`（`body` 默认跳过标题与表格内段落、`includeHeadings:true` 连标题、`all` 全文）；`font` 支持 `name`/`size`/`bold`/`italic`/`underline`/`color`，`para` 支持 `align`/`spaceBefore`/`spaceAfter`/`lineSpacing`/`firstLineIndent`/`leftIndent`/`rightIndent`。
+> 页面设置与格式改动**不进撤销栈**，回退用 Ctrl+Z 或把参数改回去。回归样本：`make-layout-test.py` 生成的 `test-layout.docx`（A4 纵向、带页眉页脚、3 段正文 + 1 张表）。
+
 **暂不能**：
-- 公式/脚注写入（只能只读）；域代码、目录、页眉页脚
+- 公式/脚注写入（只能只读）；域代码、目录
 - 单次读取默认 8000 字（`maxChars` 可抬到 30000；超大文档仍要分次读）；`doc_find` 是子串精确匹配（区分大小写，中文不受影响）
 - 多文档同时操作（一次只操作当前活动文档，别的文档的回复会被丢弃）
 - 从网络/剪贴板取图（图片必须是本机已存在的文件路径）
-- 表格结构改动**不参与一键撤销**（撤销按钮管文字/批注/加行/**按行列号填的单元格**），要退结构改动请在 WPS 里按 Ctrl+Z
+- 表格结构改动、页眉页脚、页面设置、格式改动**不参与一键撤销**（撤销按钮管文字/批注/加行/**按行列号填的单元格**），要退回请在 WPS 里按 Ctrl+Z 或在「审阅」里拒绝修订
 
 **安全边界**：pi 只开了**只读 + 执行**类工具（`read` / `ls` / `find` / `grep` / `bash`），**没有** `write` / `edit`——它不能直接改盘，所有文档改动必须经过「侧栏 → 修订写回」这条路。system prompt 里也明令禁止用 bash 去改 .docx/.xlsx、或调用 `docx-paragraph-polish` / `minimax-docx` 这类**离线改磁盘文件**的技能（那些技能改的是磁盘副本，你眼前这份文档不会变）。
 
@@ -151,7 +160,7 @@
 | 文件 | 作用 |
 |---|---|
 | `bridge.js` | 桥接守护进程：pi 子进程管理 + HTTP/SSE + 加载项静态托管（127.0.0.1:3987） |
-| `pi-doc-tools.js` | pi 扩展：给 agent 注册 `doc_info` / `doc_read` / `doc_find` 三个只读文档工具（经 `/docreq` ↔ 面板读取当前文档） |
+| `pi-doc-tools.js` | pi 扩展：给 agent 注册 `doc_info` / `doc_read` / `doc_find` / `doc_eval` 四个只读文档工具（经 `/docreq` ↔ 面板读取当前文档） |
 | `doc-assistant-prompt.md` | 注入 pi 的系统提示（文档编辑专助手 + 6 类输出代码块约定） |
 | `pi-assistant/` | WPS 加载项本体（`ui/taskpane.html` 面板、`js/taskpane.js` 逻辑、`ribbon.xml` 功能区） |
 | `sessions/` | pi 会话文件（每个文档一条，自动生成，别手动删） |
@@ -166,6 +175,7 @@
 | `test-docperf.js` | 文档读取性能探针（经 bridge `/docreq` 直测面板读取耗时，需要 WPS 开着对应文档） |
 | `test-cells.js` | 单元格写入/撤销回归（经 `/docreq` 调面板内部调试入口 `dev_cell`/`dev_cells`/`dev_undo`，需要 WPS 开着 `test-p8-merged.docx`） |
 | `test-apply-perf.js` | 批量修订的**纯本地 mock 回归**（`node test-apply-perf.js`，不需要 WPS）：把 `taskpane.js` 里的 `applyEdits` 切出来、喂模拟文档，比对 11 个用例（含"修订模式旧文字保留"的 revKeep 场景）与旧实现的最终文本是否一致 |
+| `make-layout-test.py` | 造排版能力回归样本 `test-layout.docx`（A4 纵向 + 页眉页脚 + 3 段正文 + 1 张表） |
 | `make-p8-merged.py` | 造合并单元格回归样本 `test-p8-merged.docx`（标题行合并 + 纵向合并 + 5 个空单元格） |
 | `docs/` | 项目文档：`plugin-pi-agent-方案.md`（开发方案与 P0–P9 演进记录） |
 
@@ -202,6 +212,24 @@
 ```
 
 `wps-cells` 按**行列号**写单元格（`table` 是 `doc_info` 里的表格序号，`row`/`col` 从 1 起）：空单元格没有可 `find` 的文字锚点，只能用这条路；写的是**正文**（不带 `|`、不带换行），`text` 传空串=清空；合并单元格会明确拒绝（改用 `wps-edits` 按锚点文字改）。写入会自动开修订，点「撤销上轮 AI 修订」可把原值写回。
+
+```json
+{"hfs":[{"part":"header","find":"送审稿","replace":"报批稿"},{"part":"footer","text":"水文分院　2026 年 12 月"}]}
+```
+
+`wps-headerfooter` 改页眉页脚：`part` 取 `header`/`footer`/`firstHeader`/`firstFooter`/`evenHeader`/`evenFooter`，有 `find` 做局部替换、只给 `text` 整段改写，`section` 可只改某一节。改动走修订模式，但**不进撤销栈**，回退请在「审阅」里拒绝修订。
+
+```json
+{"pages":[{"paper":"A3","orientation":"landscape","margins":{"top":2,"bottom":2,"left":2.5,"right":2.5}}]}
+```
+
+`wps-page` 改页面设置：`paper`（A3/A4/A5/B5/16K/8K/Letter/Legal 或 `width`+`height` 厘米）、`orientation`（portrait/landscape 或 纵向/横向）、`margins`（top/bottom/left/right/gutter，厘米）、`headerDistance`/`footerDistance`/`columns`。写页宽页高时会在设完方向后显式写死，避免 WPS「方向变了尺寸没换」。
+
+```json
+{"formats":[{"scope":"body","font":{"name":"仿宋_GB2312","size":12},"para":{"align":"justify","lineSpacing":1.5,"firstLineIndent":2}}]}
+```
+
+`wps-format` 改段落格式：定位三选一 `find`（一段原文）/`paras`（段号，如 `"3-8"` 或 `[3,8]`）/`scope`（`body` 默认跳过标题与表格内段落、`includeHeadings:true` 连标题、`all` 全文）；`font` 支持 `name`/`size`/`bold`/`italic`/`underline`/`color`，`para` 支持 `align`/`spaceBefore`/`spaceAfter`/`lineSpacing`（倍数，或配 `lineSpacingUnit:"pt"`）/`firstLineIndent`/`leftIndent`/`rightIndent`。页面设置与格式改动**不进撤销栈**，回退用 Ctrl+Z。
 
 `find` 必须与文档逐字一致且唯一，侧栏按它定位。找不到会明确报「✗ 未找到」，不会静默乱改。
 
@@ -248,7 +276,7 @@ git diff                    # 未暂存的具体改动
 
 **不入库的东西**（见 `.gitignore`）：`node_modules/`、所有调试截图（`*.png`）、`sessions/`（会话文件）、`sessions-map.json`、`tool-log.json`、`debug.log`、`bridge-config.json`（**可能含 API Key，绝不提交**）、`authaddin.bak-*.json`、测试生成的 `test-*.docx`（用 `make-*.py` 重新生成）。
 
-当前打过的里程碑标签：`v0.1.0`（P0–P7 完成态）、`v0.2.1`（取消上下文下拉 + 合并单元格读写）、`v0.2.2`（一键注册加载项 + 发布打包）、`v0.2.3`（大文档写入/撤销提速，修「改全文像卡死」）、`v0.2.4`（面板回复按 Markdown 渲染）、`v0.2.5`（模型下拉：从 pi 已配置的模型里选）、`v0.2.6`（回复里的 wps-* 指令块折叠成一行）。查看/回退：
+当前打过的里程碑标签：`v0.1.0`（P0–P7 完成态）、`v0.2.1`（取消上下文下拉 + 合并单元格读写）、`v0.2.2`（一键注册加载项 + 发布打包）、`v0.2.3`（大文档写入/撤销提速，修「改全文像卡死」）、`v0.2.4`（面板回复按 Markdown 渲染）、`v0.2.5`（模型下拉：从 pi 已配置的模型里选）、`v0.2.6`（回复里的 wps-* 指令块折叠成一行）、`v0.2.7`（读高亮内容）、`v0.2.8`（doc_eval 只读逃生通道）、`v0.2.9`（页眉页脚 + 页面设置 + 段落格式写入）。查看/回退：
 
 ```powershell
 git tag -l
@@ -273,4 +301,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 
 > 开发模式（`wpsjs debug`）仍需要 `npm i` 装 `pi-assistant/node_modules`，这只在开发机上做，不进发布包。
 
-开发方案文档就在本仓库：`docs\plugin-pi-agent-方案.md`（含需求分析、架构、协议、P0–P9 各阶段结果与踩坑记录）。
+开发方案文档就在本仓库：`docs\plugin-pi-agent-方案.md`（含需求分析、架构、协议、P0–P16 各阶段结果与踩坑记录）。

@@ -806,6 +806,62 @@ function readHighlights(doc, maxChars) {
     return lines.join("\n");
 }
 
+// ---------- 排版信息：页面设置 + 页眉页脚（读取） ----------
+function hfPlainText(hf) {
+    var t = "";
+    try { t = String(hf.Range.Text || ""); } catch (e) { return ""; }
+    t = t.replace(/[\r\n\u0007]+/g, " ").replace(/\u0013[^\u0014]*\u0014?/g, "[域]");
+    return t.trim();
+}
+function hfHasField(hf) {
+    try { return String(hf.Range.Text || "").indexOf("\u0013") >= 0; } catch (e) { return false; }
+}
+
+function readLayout(doc, maxChars) {
+    var CM = 28.3465;
+    function cm(v) { return (Number(v) / CM).toFixed(2); }
+    var lines = ["【排版信息】（页面设置 + 页眉页脚；长度单位 cm）"];
+    var nSec = 0;
+    try { nSec = doc.Sections.Count; } catch (e) { return "读不到分节信息"; }
+    for (var si = 1; si <= nSec; si++) {
+        var sec = null;
+        try { sec = doc.Sections.Item(si); } catch (e1) { continue; }
+        var ps = null;
+        try { ps = sec.PageSetup; } catch (e2) {}
+        var info = [];
+        if (ps) {
+            try { info.push("页面 " + cm(ps.PageWidth) + "×" + cm(ps.PageHeight)); } catch (e3) {}
+            try {
+                // 方向和宽高不一致时以实际宽高为准（WPS 换方向后偶尔只改标记不改尺寸）
+                var wv = Number(ps.PageWidth), hv = Number(ps.PageHeight);
+                var ori = Number(ps.Orientation) === 1;
+                if (wv > hv) ori = true; else if (hv > wv) ori = false;
+                info.push(ori ? "横向" : "纵向");
+            } catch (e4) {}
+            try { info.push("页边距 上" + cm(ps.TopMargin) + " 下" + cm(ps.BottomMargin) + " 左" + cm(ps.LeftMargin) + " 右" + cm(ps.RightMargin)); } catch (e5) {}
+            try { info.push("页眉距 " + cm(ps.HeaderDistance) + " 页脚距 " + cm(ps.FooterDistance)); } catch (e6) {}
+            try { var tc = Number(ps.TextColumns.Count); if (tc > 1) info.push(tc + " 栏"); } catch (e7) {}
+        }
+        lines.push("第 " + si + " 节（共 " + nSec + " 节）：" + info.join("，"));
+        var parts = [["页眉", sec.Headers, 1], ["首页页眉", sec.Headers, 2], ["偶数页页眉", sec.Headers, 3],
+                     ["页脚", sec.Footers, 1], ["首页页脚", sec.Footers, 2], ["偶数页页脚", sec.Footers, 3]];
+        for (var pi = 0; pi < parts.length; pi++) {
+            var label = parts[pi][0], coll = parts[pi][1], idx = parts[pi][2];
+            var hf = null;
+            try { hf = coll.Item(idx); } catch (e8) { continue; }
+            var exists = true;
+            try { if (hf.Exists === false) exists = false; } catch (e9) {}
+            if (!exists) continue;
+            var t = hfPlainText(hf);
+            if (!t) continue;
+            lines.push("  " + label + "：" + t + (hfHasField(hf) ? "　（含域/页码）" : ""));
+        }
+    }
+    var out = lines.join("\n");
+    if (out.length > maxChars) out = out.slice(0, maxChars) + "\n…（已截断）";
+    return out;
+}
+
 function findText(req) {
     var app = window.Application;
     var doc = app.ActiveDocument;
@@ -890,6 +946,7 @@ function handleDocReq(req) {
             if (what === "outline") return { ok: true, text: readOutline(doc, maxChars) };
             if (what === "all") return { ok: true, text: readAll(doc, maxChars) };
             if (what === "highlights") return { ok: true, text: readHighlights(doc, maxChars) };
+            if (what === "layout") return { ok: true, text: readLayout(doc, maxChars) };
             throw new Error("未知读取类型：" + what);
         }
         if (kind === "find") return { ok: true, text: findText(req) };
@@ -913,6 +970,22 @@ function handleDocReq(req) {
             if (evOut === undefined || evOut === null) evOut = String(evOut);
             if (evOut.length > 8000) evOut = evOut.slice(0, 8000) + "…（已截断）";
             return { ok: true, text: evOut };
+        }
+        if (kind === "dev_apply") {
+            // 仅本机测试脚本用：把一段「回复文本」里的 wps-* 块按正式流程应用一遍，返回各项报告
+            var rawTxt = String(req.text || "");
+            var rep = [];
+            var eA = parseEdits(rawTxt);
+            var hA = parseHFs(eA.clean);
+            var pA = parsePages(hA.clean);
+            var fA = parseFormats(pA.clean);
+            var cA = parseCells(fA.clean);
+            if (hA.hfs && hA.hfs.length) rep.push(applyHeaderFooters(hA.hfs));
+            if (pA.pages && pA.pages.length) rep.push(applyPageSetup(pA.pages));
+            if (fA.formats && fA.formats.length) rep.push(applyFormats(fA.formats));
+            if (cA.cells && cA.cells.length) rep.push(applyCells(cA.cells));
+            if (eA.edits && eA.edits.length) rep.push(applyEdits(eA.edits));
+            return { ok: true, text: rep.join("\n---\n") || "（没有可应用的块）" };
         }
         if (kind === "dev_cell") {
             var dd = window.Application.ActiveDocument;
@@ -1625,6 +1698,338 @@ function applyCells(cells) {
     return report.join("\n") || "（没有可写入的单元格）";
 }
 
+// ---------- 页眉页脚写入 ----------
+var HF_PARTS = {
+    header: ["Headers", 1], footer: ["Footers", 1],
+    firstHeader: ["Headers", 2], firstFooter: ["Footers", 2],
+    evenHeader: ["Headers", 3], evenFooter: ["Footers", 3]
+};
+var HF_PART_CN = {
+    header: "页眉", footer: "页脚", firstHeader: "首页页眉",
+    firstFooter: "首页页脚", evenHeader: "偶数页页眉", evenFooter: "偶数页页脚"
+};
+
+// 在页眉/页脚「story」里替换一段文字：先用 Find，失败退回文本内定位 + SetRange
+function replaceInStory(storyRange, find, rep) {
+    try {
+        var f = storyRange.Find;
+        if (f && typeof f.Execute === "function") {
+            try { f.ClearFormatting(); } catch (e0) {}
+            f.Text = find;
+            f.Forward = true;
+            f.Wrap = 0;
+            if (f.Execute()) { storyRange.Text = rep; return 1; }
+            return 0;
+        }
+    } catch (e1) {}
+    try {
+        var t = String(storyRange.Text || "");
+        var off = t.indexOf(find);
+        if (off < 0) return 0;
+        var st = Number(storyRange.Start) || 0;
+        var sub = null;
+        try { sub = storyRange.Duplicate; } catch (e2) {}
+        if (!sub) sub = storyRange;
+        sub.SetRange(st + off, st + off + find.length);
+        sub.Text = rep;
+        return 1;
+    } catch (e3) { return -1; }
+}
+
+function applyHeaderFooters(items) {
+    var doc = window.Application.ActiveDocument;
+    if (!doc) return "⚠ 没有打开的文档";
+    var report = [];
+    try { doc.TrackRevisions = true; } catch (e) {}
+    var nSec = 1;
+    try { nSec = doc.Sections.Count; } catch (e1) {}
+    var doneCnt = 0;
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i] || {};
+        var part = String(it.part || "header");
+        var pk = HF_PARTS[part];
+        var head = "第" + (i + 1) + "条";
+        if (!pk) { report.push("✗ " + head + "：part 只能是 header/footer/firstHeader/firstFooter/evenHeader/evenFooter"); continue; }
+        if (!it.find && it.text === undefined) { report.push("✗ " + head + "：要给 find + replace（局部改）或 text（整段改写）"); continue; }
+        var secs = [];
+        if (it.section) secs.push(parseInt(it.section, 10)); else for (var s = 1; s <= nSec; s++) secs.push(s);
+        var hit = 0;
+        for (var k = 0; k < secs.length; k++) {
+            var si = secs[k];
+            try {
+                var sec = doc.Sections.Item(si);
+                var hf = sec[pk[0]].Item(pk[1]);
+                if (!hf) continue;
+                var ex = true;
+                try { if (hf.Exists === false) ex = false; } catch (e2) {}
+                if (!ex) continue;
+                var rng = hf.Range;
+                if (it.text !== undefined) {
+                    rng.Text = String(it.text);
+                    hit++;
+                    report.push("✎ 第 " + si + " 节 " + HF_PART_CN[part] + "：整段改写为「" + String(it.text).slice(0, 30) + "」");
+                } else {
+                    var rep = (it.replace === undefined || it.replace === null) ? "" : String(it.replace);
+                    var r = replaceInStory(rng, String(it.find), rep);
+                    if (r === 1) {
+                        hit++;
+                        report.push("✎ 第 " + si + " 节 " + HF_PART_CN[part] + "：「" + String(it.find).slice(0, 24) + "」→「" + rep.slice(0, 24) + "」");
+                    } else if (r < 0) {
+                        report.push("✗ 第 " + si + " 节 " + HF_PART_CN[part] + "：写入失败");
+                    }
+                }
+            } catch (e3) {
+                report.push("✗ 第 " + si + " 节 " + HF_PART_CN[part] + "：" + (e3 && e3.message ? e3.message : e3));
+            }
+        }
+        if (!hit) report.push("✗ " + head + "：指定范围的" + HF_PART_CN[part] + "里没找到「" + String(it.find || "").slice(0, 20) + "」");
+        else doneCnt += hit;
+    }
+    if (doneCnt) {
+        var ent = ensureTurn();
+        ent.hfWrites = (ent.hfWrites || 0) + doneCnt;
+        report.push("（共改 " + doneCnt + " 处页眉页脚，已开修订；页眉页脚改动不参与「撤销上轮AI修订」，可在「审阅」里拒绝）");
+    }
+    nudgeRepaint();
+    return report.join("\n");
+}
+
+// ---------- 页面设置（排版） ----------
+var PAPER_CM = {
+    A3: [29.7, 42.0], A4: [21.0, 29.7], A5: [14.8, 21.0], B5: [17.6, 25.0],
+    "16K": [18.4, 26.0], "8K": [26.0, 36.8], LETTER: [21.59, 27.94], LEGAL: [21.59, 35.56]
+};
+
+function applyPageSetup(items) {
+    var doc = window.Application.ActiveDocument;
+    if (!doc) return "⚠ 没有打开的文档";
+    var report = [], changed = 0;
+    var nSec = 1;
+    try { nSec = doc.Sections.Count; } catch (e) {}
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i] || {};
+        var head = "第" + (i + 1) + "条";
+        var secs = [];
+        if (it.section) secs.push(parseInt(it.section, 10)); else for (var s = 1; s <= nSec; s++) secs.push(s);
+        for (var k = 0; k < secs.length; k++) {
+            var si = secs[k];
+            var parts = [];
+            try {
+                var ps = doc.Sections.Item(si).PageSetup;
+                var dim = null;          // 目标纸型尺寸（cm，纵向基准：短边×长边）
+                var finalWH = null;      // 最终要写死到 PageWidth/PageHeight 的尺寸
+                if (it.paper) {
+                    dim = PAPER_CM[String(it.paper).toUpperCase()];
+                    if (!dim) { report.push("✗ " + head + "：未知纸型「" + it.paper + "」（支持 A3/A4/A5/B5/16K/8K/Letter/Legal，或用 width+height 厘米）"); continue; }
+                    finalWH = dim.slice();
+                    parts.push("纸型 " + String(it.paper).toUpperCase());
+                }
+                if (it.width && it.height) {
+                    finalWH = [Number(it.width), Number(it.height)];
+                    parts.push("自定义 " + it.width + "×" + it.height + "cm");
+                }
+                if (it.orientation) {
+                    var ori = (String(it.orientation).toLowerCase() === "landscape" || String(it.orientation) === "横向") ? 1 : 0;
+                    try {
+                        // 先设方向（WPS 会自己旋转当前页宽页高），随后再显式写死宽高，避免「方向已变、尺寸没换」的错位
+                        ps.Orientation = ori;
+                        parts.push(ori ? "横向" : "纵向");
+                    } catch (e3) {}
+                    if (finalWH) {
+                        finalWH = ori ? [Math.max(finalWH[0], finalWH[1]), Math.min(finalWH[0], finalWH[1])]
+                                      : [Math.min(finalWH[0], finalWH[1]), Math.max(finalWH[0], finalWH[1])];
+                    } else {
+                        try {
+                            var cw = ps.PageWidth / PT_PER_CM, ch = ps.PageHeight / PT_PER_CM;
+                            finalWH = ori ? [Math.max(cw, ch), Math.min(cw, ch)] : [Math.min(cw, ch), Math.max(cw, ch)];
+                        } catch (e3b) {}
+                    }
+                }
+                if (finalWH) {
+                    try {
+                        ps.PageWidth = finalWH[0] * PT_PER_CM;
+                        ps.PageHeight = finalWH[1] * PT_PER_CM;
+                        if (!it.paper && !it.width) parts.push("页宽高 " + finalWH[0].toFixed(2) + "×" + finalWH[1].toFixed(2) + "cm");
+                    } catch (e2) { report.push("✗ " + head + " 页宽高：" + (e2 && e2.message ? e2.message : e2)); }
+                }
+                if (it.margins) {
+                    var m = it.margins;
+                    try {
+                        if (m.top !== undefined) ps.TopMargin = Number(m.top) * PT_PER_CM;
+                        if (m.bottom !== undefined) ps.BottomMargin = Number(m.bottom) * PT_PER_CM;
+                        if (m.left !== undefined) ps.LeftMargin = Number(m.left) * PT_PER_CM;
+                        if (m.right !== undefined) ps.RightMargin = Number(m.right) * PT_PER_CM;
+                        if (m.gutter !== undefined) ps.Gutter = Number(m.gutter) * PT_PER_CM;
+                        var mp = [];
+                        if (m.top !== undefined) mp.push("上" + m.top);
+                        if (m.bottom !== undefined) mp.push("下" + m.bottom);
+                        if (m.left !== undefined) mp.push("左" + m.left);
+                        if (m.right !== undefined) mp.push("右" + m.right);
+                        parts.push("页边距 " + mp.join(" ") + " cm");
+                    } catch (e4) { report.push("✗ " + head + " 页边距：" + e4.message); }
+                }
+                if (it.headerDistance !== undefined) { try { ps.HeaderDistance = Number(it.headerDistance) * PT_PER_CM; parts.push("页眉距 " + it.headerDistance + "cm"); } catch (e5) {} }
+                if (it.footerDistance !== undefined) { try { ps.FooterDistance = Number(it.footerDistance) * PT_PER_CM; parts.push("页脚距 " + it.footerDistance + "cm"); } catch (e6) {} }
+                if (it.columns) { try { ps.TextColumns.SetCount(parseInt(it.columns, 10)); parts.push(it.columns + " 栏"); } catch (e7) { report.push("✗ " + head + " 分栏：" + e7.message); } }
+                changed++;
+                report.push("✎ 第 " + si + " 节：" + (parts.join("，") || "（没有给出要改的项）"));
+            } catch (e8) {
+                report.push("✗ 第 " + si + " 节：" + (e8 && e8.message ? e8.message : e8));
+            }
+        }
+    }
+    if (changed) report.push("（页面设置属文档级属性，不参与「撤销上轮AI修订」；如需回退用 Ctrl+Z 或把参数改回去）");
+    nudgeRepaint();
+    return report.join("\n");
+}
+
+// ---------- 段落/文字格式（排版） ----------
+var WD_ALIGN = { left: 0, center: 1, right: 2, justify: 3, distribute: 4 };
+
+function hexToRgb(hex) {
+    var s = String(hex || "").replace("#", "");
+    if (s.length !== 6) return null;
+    var r = parseInt(s.slice(0, 2), 16), g = parseInt(s.slice(2, 4), 16), b = parseInt(s.slice(4, 6), 16);
+    if (isNaN(r) || isNaN(g) || isNaN(b)) return null;
+    return r * 65536 + g * 256 + b;
+}
+
+function parseParaSpec(spec) {
+    if (Object.prototype.toString.call(spec) === "[object Array]") {
+        var a = parseInt(spec[0], 10), b = parseInt(spec[1], 10);
+        if (!a) return null;
+        return [a, b || a];
+    }
+    var t = String(spec);
+    var m = t.match(/(\d+)\s*[-–—~至]\s*(\d+)/);
+    if (m) return [parseInt(m[1], 10), parseInt(m[2], 10)];
+    var n = parseInt(t, 10);
+    return n ? [n, n] : null;
+}
+
+function applyFormats(items) {
+    var doc = window.Application.ActiveDocument;
+    if (!doc) return "⚠ 没有打开的文档";
+    var report = [];
+    try { doc.TrackRevisions = true; } catch (e) {}
+    var n = 0, t0 = (new Date()).getTime();
+    var screenWas = null;
+    try { screenWas = window.Application.ScreenUpdating; window.Application.ScreenUpdating = false; } catch (e0) {}
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i] || {};
+        var head = "第" + (i + 1) + "条";
+        var targets = [], label = "";
+        try {
+            if (it.find) {
+                var idx = findParaIdx(doc, String(it.find));
+                if (idx < 0) { report.push("✗ " + head + "：没找到锚点「" + String(it.find).slice(0, 20) + "」"); continue; }
+                targets = [idx];
+                label = "第 " + idx + " 段（「" + String(it.find).slice(0, 16) + "」）";
+            } else if (it.paras !== undefined) {
+                var pr = parseParaSpec(it.paras);
+                if (!pr) { report.push("✗ " + head + "：paras 要写成 \"3-8\" 或 [3,8]"); continue; }
+                var total0 = 1;
+                try { total0 = doc.Paragraphs.Count; } catch (e1) {}
+                pr[0] = Math.max(1, pr[0]); pr[1] = Math.min(total0, pr[1]);
+                for (var p = pr[0]; p <= pr[1]; p++) targets.push(p);
+                label = "第 " + pr[0] + "～" + pr[1] + " 段";
+            } else {
+                var scope = String(it.scope || "body");
+                var total = 0;
+                try { total = doc.Paragraphs.Count; } catch (e2) {}
+                if (scope === "all") {
+                    for (var q = 1; q <= total; q++) targets.push(q);
+                    label = "全文 " + total + " 段";
+                } else {
+                    for (var q2 = 1; q2 <= total; q2++) {
+                        var pp = doc.Paragraphs.Item(q2);
+                        var inT = false;
+                        try { inT = !!pp.Range.Information(12); } catch (e3) {}
+                        if (inT) continue;
+                        var stName = "";
+                        try { stName = String(pp.Style.NameLocal || ""); } catch (e4) {}
+                        if (!it.includeHeadings && /^(标题|Heading)/i.test(stName)) continue;
+                        targets.push(q2);
+                    }
+                    label = "正文 " + targets.length + " 段（不含表格/标题）";
+                }
+            }
+        } catch (e5) { report.push("✗ " + head + "：定位失败 " + (e5 && e5.message ? e5.message : e5)); continue; }
+        if (!targets.length) { report.push("✗ " + head + "：没有匹配到段落"); continue; }
+        var okc = 0, fail = 0;
+        for (var z = 0; z < targets.length; z++) {
+            if ((new Date()).getTime() - t0 > 90000) { report.push("⚠ 已超过 90 秒，剩余段落未处理（可再发一次只改剩下的）"); break; }
+            try {
+                var para = doc.Paragraphs.Item(targets[z]);
+                if (!para) continue;
+                var rng = para.Range;
+                if (it.style) { try { para.Style = String(it.style); } catch (e6) {} }
+                if (it.font) {
+                    var fnt = it.font, f = null;
+                    try { f = rng.Font; } catch (e7) {}
+                    if (f) {
+                        if (fnt.name) {
+                            try { f.Name = String(fnt.name); } catch (e8) {}
+                            try { f.NameFarEast = String(fnt.name); } catch (e9) {}
+                        }
+                        if (fnt.size) { try { f.Size = Number(fnt.size); } catch (e10) {} }
+                        if (fnt.bold !== undefined) { try { f.Bold = fnt.bold ? 1 : 0; } catch (e11) {} }
+                        if (fnt.italic !== undefined) { try { f.Italic = fnt.italic ? 1 : 0; } catch (e12) {} }
+                        if (fnt.underline !== undefined) { try { f.Underline = fnt.underline ? 1 : 0; } catch (e13) {} }
+                        if (fnt.color) { var cv = hexToRgb(fnt.color); if (cv !== null) { try { f.Color = cv; } catch (e14) {} } }
+                    }
+                }
+                if (it.para) {
+                    var pf = null;
+                    try { pf = rng.ParagraphFormat; } catch (e15) {}
+                    var pp2 = it.para;
+                    if (pf) {
+                        if (pp2.align) { var av = WD_ALIGN[String(pp2.align).toLowerCase()]; if (av !== undefined) { try { pf.Alignment = av; } catch (e16) {} } }
+                        if (pp2.spaceBefore !== undefined) { try { pf.SpaceBefore = Number(pp2.spaceBefore); } catch (e17) {} }
+                        if (pp2.spaceAfter !== undefined) { try { pf.SpaceAfter = Number(pp2.spaceAfter); } catch (e18) {} }
+                        if (pp2.lineSpacing !== undefined) {
+                            var ls = Number(pp2.lineSpacing);
+                            try {
+                                if (ls === 1) pf.LineSpacingRule = 0;
+                                else if (ls === 1.5) pf.LineSpacingRule = 1;
+                                else if (ls === 2) pf.LineSpacingRule = 2;
+                                else if (String(pp2.lineSpacingUnit || "") === "pt") { pf.LineSpacingRule = 4; pf.LineSpacing = ls; }
+                                else { pf.LineSpacingRule = 5; pf.LineSpacing = ls * 12; }
+                            } catch (e19) {}
+                        }
+                        if (pp2.firstLineIndent !== undefined) {
+                            try { pf.CharacterUnitFirstLineIndent = Number(pp2.firstLineIndent); }
+                            catch (e20) { try { pf.FirstLineIndent = Number(pp2.firstLineIndent) * 12; } catch (e21) {} }
+                        }
+                        if (pp2.leftIndent !== undefined) { try { pf.CharacterUnitLeftIndent = Number(pp2.leftIndent); } catch (e22) {} }
+                        if (pp2.rightIndent !== undefined) { try { pf.CharacterUnitRightIndent = Number(pp2.rightIndent); } catch (e23) {} }
+                        if (pp2.outlineLevel !== undefined) { try { pf.OutlineLevel = Number(pp2.outlineLevel); } catch (e24) {} }
+                    }
+                }
+                okc++; n++;
+            } catch (e25) { fail++; }
+        }
+        var brief = [];
+        if (it.style) brief.push("样式「" + it.style + "」");
+        if (it.font) {
+            if (it.font.name) brief.push("字体 " + it.font.name);
+            if (it.font.size) brief.push(it.font.size + "pt");
+            if (it.font.bold !== undefined) brief.push(it.font.bold ? "加粗" : "取消加粗");
+            if (it.font.color) brief.push("颜色 " + it.font.color);
+        }
+        if (it.para) {
+            if (it.para.align) brief.push("对齐 " + it.para.align);
+            if (it.para.lineSpacing) brief.push("行距 " + it.para.lineSpacing);
+            if (it.para.firstLineIndent !== undefined) brief.push("首行缩进 " + it.para.firstLineIndent + " 字");
+        }
+        report.push("✎ " + label + "：" + (brief.join("、") || "已应用格式") + "（成功 " + okc + (fail ? "，失败 " + fail : "") + " 段）");
+    }
+    try { if (screenWas !== null) window.Application.ScreenUpdating = screenWas; } catch (e26) {}
+    if (n) report.push("（共处理 " + n + " 段；格式改动不参与「撤销上轮AI修订」，回退用 Ctrl+Z 或重新指定格式）");
+    nudgeRepaint();
+    return report.join("\n");
+}
+
 // ---------- 批注 ----------
 function applyComments(comments) {
     var doc = window.Application.ActiveDocument;
@@ -1759,6 +2164,19 @@ function parseCells(text) {
 function parseParas(text) {
     var r = parseBlock(text, "wps-paragraphs");
     return { paras: r.data ? (r.data.paragraphs || []) : null, clean: r.clean, raw: r.raw };
+}
+function parseHFs(text) {
+    var r = parseBlock(text, "wps-headerfooter");
+    var d = r.data || {};
+    return { hfs: r.data ? (d.hfs || d.headers || []) : null, clean: r.clean, raw: r.raw };
+}
+function parsePages(text) {
+    var r = parseBlock(text, "wps-page");
+    return { pages: r.data ? (r.data.pages || []) : null, clean: r.clean, raw: r.raw };
+}
+function parseFormats(text) {
+    var r = parseBlock(text, "wps-format");
+    return { formats: r.data ? (r.data.formats || []) : null, clean: r.clean, raw: r.raw };
 }
 
 // paragraphs: [{after:"锚点段落文字", texts:["第一段","第二段"]}] —— 一次性在锚点后按顺序插入多段（写报告用）
@@ -2422,6 +2840,18 @@ function finishTurn(b) {
             addMsg("edit", applyCells(b.clb.cells));
             did.push("填写单元格 " + b.clb.cells.length + " 个");
         }
+        if (b.hfb.hfs && b.hfb.hfs.length) {
+            addMsg("edit", applyHeaderFooters(b.hfb.hfs));
+            did.push("页眉页脚 " + b.hfb.hfs.length + " 处");
+        }
+        if (b.pgb.pages && b.pgb.pages.length) {
+            addMsg("edit", applyPageSetup(b.pgb.pages));
+            did.push("页面设置 " + b.pgb.pages.length + " 项");
+        }
+        if (b.fmb.formats && b.fmb.formats.length) {
+            addMsg("edit", applyFormats(b.fmb.formats));
+            did.push("格式 " + b.fmb.formats.length + " 组");
+        }
         if (b.blocks) addBlockDisclosure(lastAiBubble(), b.blocks);
         endTurn();
         setStatus(did.length ? "AI 已" + did.join("、") + "，可在「审阅」中处理" : "");
@@ -2489,18 +2919,22 @@ function connectSSE() {
             var opsb = parseOps(tbls.clean);
             var prb = parseParas(opsb.clean);
             var clb = parseCells(prb.clean);
+            var hfb = parseHFs(clb.clean);
+            var pgb = parsePages(hfb.clean);
+            var fmb = parseFormats(pgb.clean);
             aiBuf = "";
             if (aiDiv) {
-                if (clb.clean && clb.clean.trim()) {
+                if (fmb.clean && fmb.clean.trim()) {
                     aiDiv.className = "msg ai md";
-                    aiDiv.innerHTML = mdToHtml(clb.clean);   // 流式阶段是纯文本，收尾时按 Markdown 重排一次
+                    aiDiv.innerHTML = mdToHtml(fmb.clean);   // 流式阶段是纯文本，收尾时按 Markdown 重排一次
                 }
                 else if (aiDiv.parentNode) aiDiv.parentNode.removeChild(aiDiv);  // 工具轮次没留下文字就别留空气泡
                 aiDiv = null;
             }
-            else if (clb.clean) addMsg("ai", clb.clean);
+            else if (fmb.clean) addMsg("ai", fmb.clean);
             setTitleMark(false);
             var b = { parsed: parsed, cmt: cmt, rws: rws, imgs: imgs, tbls: tbls, opsb: opsb, prb: prb, clb: clb,
+                hfb: hfb, pgb: pgb, fmb: fmb,
                 blocks: [
                     { tag: "wps-edits", name: "修订", items: parsed.edits, raw: parsed.raw },
                     { tag: "wps-comments", name: "批注", items: cmt.comments, raw: cmt.raw },
@@ -2509,11 +2943,15 @@ function connectSSE() {
                     { tag: "wps-tables", name: "建表", items: tbls.tables, raw: tbls.raw },
                     { tag: "wps-tableops", name: "表结构", items: opsb.ops, raw: opsb.raw },
                     { tag: "wps-paragraphs", name: "段落", items: prb.paras, raw: prb.raw },
-                    { tag: "wps-cells", name: "填单元格", items: clb.cells, raw: clb.raw }
+                    { tag: "wps-cells", name: "填单元格", items: clb.cells, raw: clb.raw },
+                    { tag: "wps-headerfooter", name: "页眉页脚", items: hfb.hfs, raw: hfb.raw },
+                    { tag: "wps-page", name: "页面设置", items: pgb.pages, raw: pgb.raw },
+                    { tag: "wps-format", name: "格式", items: fmb.formats, raw: fmb.raw }
                 ] };
             var nEdits = (parsed.edits || []).length;
             var nAll = nEdits + (cmt.comments || []).length + (rws.rows || []).length + (imgs.images || []).length +
-                (tbls.tables || []).length + (opsb.ops || []).length + (prb.paras || []).length + (clb.cells || []).length;
+                (tbls.tables || []).length + (opsb.ops || []).length + (prb.paras || []).length + (clb.cells || []).length +
+                (hfb.hfs || []).length + (pgb.pages || []).length + (fmb.formats || []).length;
             if (!nAll) {
                 setStatus("");
             } else {
