@@ -755,6 +755,57 @@ function readAll(doc, maxChars) {
     return lines.join("\n");
 }
 
+var HL_NAMES = { 1:"黑", 2:"蓝", 3:"青绿", 4:"亮绿", 5:"粉", 6:"红", 7:"黄", 8:"白", 9:"蓝黑", 10:"青", 11:"绿", 12:"紫", 13:"深红", 14:"深黄", 15:"50%灰", 16:"25%灰" };
+function hlName(idx) { return HL_NAMES[idx] || ("色号" + idx); }
+
+function readHighlights(doc, maxChars) {
+    var total = 0;
+    try { total = doc.Paragraphs.Count; } catch (e) {}
+    var lines = ["【高亮内容】（扫描全部段落；格式 段号｜位置｜颜色｜内容，«» 包住的是段内被高亮的部分）"];
+    var used = 0, found = 0, truncated = false;
+    for (var i = 1; i <= total; i++) {
+        var rng = doc.Paragraphs.Item(i).Range;
+        var idx = 0;
+        try { idx = Number(rng.HighlightColorIndex) || 0; } catch (e) {}
+        try { if (!idx) idx = Number(rng.Font.HighlightColorIndex) || 0; } catch (e2) {}
+        if (!idx) continue;
+        var inTbl = false;
+        try { inTbl = !!rng.Information(12); } catch (e3) {}
+        var loc = inTbl ? "表格内" : "正文";
+        var t = cleanText(rng.Text).replace(/\n/g, " ").trim();
+        if (!t) continue;
+        var line;
+        if (idx === 9999999) { // 段内部分高亮：逐词包标记
+            var words = null;
+            try { words = rng.Words; } catch (e4) {}
+            if (words) {
+                var buf = "", wCount = 0;
+                try { wCount = words.Count; } catch (e5) {}
+                for (var w = 1; w <= wCount; w++) {
+                    var wr = words.Item(w);
+                    var wi = 0, wt = "";
+                    try { wi = Number(wr.HighlightColorIndex) || 0; } catch (e6) {}
+                    try { if (!wi) wi = Number(wr.Font.HighlightColorIndex) || 0; } catch (e7) {}
+                    wt = cleanText(wr.Text);
+                    if (!wt) continue;
+                    buf += wi ? "«" + wt.replace(/[\r\n\a]+$/, "") + "»" : wt;
+                    if (buf.length > 1200) { buf += "…"; break; }
+                }
+                line = "[" + i + "] " + loc + "｜" + buf.trim();
+            } else line = "[" + i + "] " + loc + "｜" + t;
+        } else {
+            line = "[" + i + "] " + loc + "｜" + hlName(idx) + "｜" + t;
+        }
+        used += line.length + 1;
+        lines.push(line);
+        found++;
+        if (used >= maxChars) { truncated = true; break; }
+    }
+    if (!found) lines.push("（全文没有发现高亮；提示：高亮=突出显示，不含字体颜色/底纹）");
+    if (truncated) lines.push("…（已截断）");
+    return lines.join("\n");
+}
+
 function findText(req) {
     var app = window.Application;
     var doc = app.ActiveDocument;
@@ -838,6 +889,7 @@ function handleDocReq(req) {
             if (what === "table") return { ok: true, text: readTable(doc, req.index || 0, req, false) };
             if (what === "outline") return { ok: true, text: readOutline(doc, maxChars) };
             if (what === "all") return { ok: true, text: readAll(doc, maxChars) };
+            if (what === "highlights") return { ok: true, text: readHighlights(doc, maxChars) };
             throw new Error("未知读取类型：" + what);
         }
         if (kind === "find") return { ok: true, text: findText(req) };
