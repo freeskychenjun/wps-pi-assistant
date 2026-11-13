@@ -311,7 +311,6 @@ function buildArgs(cfg) {
         "--mode", "rpc",
         "--no-extensions",        // 去掉 coding agent 的插件噪声
         "-e", DOC_TOOLS_EXT,      // 显式加载本地扩展：doc_info/doc_read/doc_find（只读文档）
-        "--skill", SKILLS_DIR,    // 加载 DSH/Claude 技能目录（改文档仍只走 wps-* 指令）
         "--tools", TOOL_ALLOW,    // 只开只读 + 执行类工具，不开 write/edit
         "--no-prompt-templates",
         "--no-themes",
@@ -319,6 +318,8 @@ function buildArgs(cfg) {
         "--system-prompt", PROMPT_FILE,
         "--session-dir", SESS_DIR
     ];
+    // 技能目录存在才加载：同事机器上没装 DSH/Claude 技能时也能正常启动
+    if (fs.existsSync(SKILLS_DIR)) args.push("--skill", SKILLS_DIR);
     if (cfg.provider) args.push("--provider", cfg.provider);
     if (cfg.model) args.push("--model", cfg.model);
     return args;

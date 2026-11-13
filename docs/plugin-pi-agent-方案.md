@@ -150,6 +150,14 @@
 - 验证（2026-11-13 09:00–09:25）：合并表 info/读表/检索全部 ok；真实 UI 路径（整表选中 → "把第 5 行五个空单元格填上"）agent 调 `doc_read` + 输出 `wps-cells`，5 格写入成功（213/165/155/131/114，红色修订），Ctrl+Shift+Z 撤销后 5 格干净回到空。
 - 调试入口：`/docreq` 额外支持 `dev_cell`（转储单元格文本/范围/修订）、`dev_cells`（直接跑 applyCells）、`dev_undo`（跑撤销），仅供本机回归脚本 `test-cells.js` 使用。
 
+### P11 面向分发的安装与打包（已完成 2026-11-13）
+- 动机（用户 2026-11-13 提）：插件要分发给同事安装，但 system prompt / README / 脚本里写死了开发机路径 `D:\DSH工作区\wps-pi-plugin`；且加载项注册要手改 `publish.xml`、发布包不该带 71 MB 的 `node_modules`。
+- 去硬编码：prompt 里 bash 工作目录改为"当前工作目录"表述、临时文件约定改成相对路径 `tmp\`；`bridge.js` 启动时自动创建 `tmp/`；`make-*.py` 产物保存到脚本自身目录（`os.path.dirname(__file__)`）；`ui-helper.ps1` 截图默认 `$PSScriptRoot\shot.png`；README 命令改 `<插件所在目录>` 占位。另修：`--skill` 目录不存在时不再传给 pi（同事机器没装 DSH 技能也能启动）。
+- `install-addin.ps1`：写 `%APPDATA%\kingsoft\wps\jsaddons\publish.xml`，幂等合并 `<jspluginonline name="pi-assistant" url="http://127.0.0.1:3987/addin/" enable="enable_dev"/>`，写前备份（保留 5 个 `.bak`），保留别人已注册的加载项；支持 `-DryRun` / `-Remove` / `-Url`。`install-addin.cmd` 是双击入口（注册完顺手 `start-bridge.cmd`）。
+- `pack-release.ps1`：白名单收集生产文件 → `dist\wps-pi-assistant-v<版本>.zip`（22 文件 / 约 70 KB），排除 `pi-assistant/node_modules`、`package*.json`、`vite.config.js`、`sessions/`、`tmp/`、测试样本、日志、`bridge-config.json`；内置自检（关键文件齐、敏感文件未混入）。
+- 踩坑：① PowerShell 5.1 按 ANSI 读**无 BOM** 脚本，中文注释/字符串会解析失败 → 分发脚本一律纯 ASCII；② `XmlElement.Name` 在 PowerShell 里会被解析成 `name` **属性**（大小写不敏感），判断元素名要用 `LocalName`（否则会把已有注册误判为"新增"）；③ 读取 `publish.xml` 必须用 `XmlWriter` 写 UTF-8 无 BOM，保持 WPS 能读。
+- 验证：`-DryRun` 三种分支（已注册/改地址/移除）输出正确；真实写入+备份+幂等+移除路径在备份保护下验证后已恢复原 `publish.xml`；发布包解压到空目录后能独立启动 bridge、`/health` ok、`/addin/ui/taskpane.html` 与 `/addin/js/taskpane.js` 正常返回（生产托管不依赖 node_modules）。
+
 ## 4. 主要风险与预案
 
 | # | 风险 | 等级 | 预案 |

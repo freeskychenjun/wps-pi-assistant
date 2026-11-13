@@ -4,7 +4,7 @@
 
 不依赖 DSH，只要本机有 Node + pi 即可用。
 
-> **分发给同事**：把整个插件目录拷过去即可，**代码里没有写死盘符或绝对路径**——插件目录放哪都行（带中文、空格也可以）。对方机器只需：① 有 Node.js（≥18）和 `pi` 命令；② 在 `%APPDATA%\kingsoft\wps\jsaddons\publish.xml` 里加一行 `<jspluginonline name="pi-assistant" type="wps" url="http://127.0.0.1:3987/addin/" enable="enable_dev"/>`；③ 双击 `start-bridge.cmd`，WPS 里首次信任加载项；④ 在侧栏「模型配置」填自己的 provider/model/API Key（每台机器各配各的，`bridge-config.json` 不进 git）。技能目录 `%USERPROFILE%\.claude\skills` 是可选的，没有也能用（只是少了那批技能）。
+> **分发给同事**：先把发布包打出来（见文末「打包发布」），对方解压到任意位置，**双击 `install-addin.cmd`** 即可——它会自动把加载项注册进 WPS 的 `publish.xml`（先备份、幂等、不影响别人已注册的其他加载项），然后启动桥接。对方机器只需：① 有 Node.js（≥18）和 `pi` 命令；② 首次在 WPS 里信任加载项；③ 在侧栏「模型配置」填自己的 provider/model/API Key（每台机器各配各的，`bridge-config.json` 不进 git）。代码里没有写死盘符或绝对路径，插件目录放哪都行（带中文、空格也可以）；技能目录 `%USERPROFILE%\.claude\skills` 是可选的，没有也能启动（只是少了那批技能）。
 
 ---
 
@@ -141,6 +141,8 @@
 | `tool-log.json` | 每条回复用过哪些工具/技能的记录（供「历史」显示「⚙ 用过 bash」） |
 | `bridge-config.json` | 桥接记住的模型配置（有 provider/model 时自动生成，桥接重启后自动拉起 pi） |
 | `start-bridge.cmd` | 一键启动桥接（幂等） |
+| `install-addin.cmd` / `install-addin.ps1` | 一键注册加载项（写 `%APPDATA%\kingsoft\wps\jsaddons\publish.xml`，自动备份、幂等合并、支持 `-Remove` 卸载、`-DryRun` 预览；`.cmd` 注册完顺手启动桥接） |
+| `pack-release.ps1` | 打发布包：`powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1` → `dist\wps-pi-assistant-v<版本>.zip`（只含生产文件，约 70 KB，不含 `node_modules`） |
 | `ui-helper.ps1` | 调试辅助：截图/点击/裁剪窗口（开发用，日常不需要） |
 | `test-e2e.js` / `test-session.js` / `test-skills.js` | 桥接层测试（不经 WPS，纯 HTTP/SSE；`test-skills.js "问题"` 可验证技能与工具） |
 | `test-docperf.js` | 文档读取性能探针（经 bridge `/docreq` 直测面板读取耗时，需要 WPS 开着对应文档） |
@@ -216,12 +218,29 @@ git diff                    # 未暂存的具体改动
 
 **不入库的东西**（见 `.gitignore`）：`node_modules/`、所有调试截图（`*.png`）、`sessions/`（会话文件）、`sessions-map.json`、`tool-log.json`、`debug.log`、`bridge-config.json`（**可能含 API Key，绝不提交**）、`authaddin.bak-*.json`、测试生成的 `test-*.docx`（用 `make-*.py` 重新生成）。
 
-当前打过一个里程碑标签：`v0.1.0`（P0–P7 完成态）。查看/回退：
+当前打过的里程碑标签：`v0.1.0`（P0–P7 完成态）、`v0.2.1`（取消上下文下拉 + 合并单元格读写）。查看/回退：
 
 ```powershell
 git tag -l
-git show v0.1.0 --stat
-git checkout v0.1.0        # 只看不留：看完记得 git switch main
+git show v0.2.1 --stat
+git checkout v0.2.1        # 只看不留：看完记得 git switch main
 ```
 
-开发方案文档就在本仓库：`docs\plugin-pi-agent-方案.md`（含需求分析、架构、协议、P0–P7 各阶段结果与踩坑记录）。
+---
+
+## 八、打包发布（给同事）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
+# 版本号默认取最近的 git 标签，也可 -Version 0.2.2
+```
+
+产出 `dist\wps-pi-assistant-v<版本>.zip`（约 70 KB / 22 个文件）。里面只有**生产必需**的文件：`bridge.js`、`pi-doc-tools.js`、`doc-assistant-prompt.md`、`start-bridge.cmd`、`install-addin.cmd/.ps1`、`README.md`，以及 `pi-assistant/` 的 `index.html`、`main.js`、`manifest.xml`、`ribbon.xml`、`js/`、`ui/`、`images/`。
+
+**不含**：`pi-assistant/node_modules`（71 MB，只有 `wpsjs debug` 开发模式要）、`package.json`/`vite.config.js`、`sessions/`、`tmp/`、测试样本、日志、`bridge-config.json`（可能含 API Key）。脚本最后会自检：关键文件在、`node_modules` 和 `bridge-config.json` 没混进去、zip 能生成。
+
+同事拿到 zip 后：解压到任意位置 → 双击 `install-addin.cmd` → 重启 WPS 并信任加载项 → 打开侧栏填模型配置。
+
+> 开发模式（`wpsjs debug`）仍需要 `npm i` 装 `pi-assistant/node_modules`，这只在开发机上做，不进发布包。
+
+开发方案文档就在本仓库：`docs\plugin-pi-agent-方案.md`（含需求分析、架构、协议、P0–P9 各阶段结果与踩坑记录）。

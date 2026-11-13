@@ -32,3 +32,4 @@ desktop.ini
 .DS_Store
 tmp/*.txt
 __pycache__/
+dist/
