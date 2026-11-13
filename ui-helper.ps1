@@ -81,6 +81,37 @@ switch ($Action) {
         Start-Sleep -Milliseconds 300
         "sent key " + $Text
     }
+    "focusclick" {
+        # 同一个进程里「先激活窗口 → 再点」，避免两次调用之间焦点被别的窗口抢走；
+        # 句柄直接取进程 MainWindowHandle（比 EnumWindows 找标题稳）
+        $p = Get-Process wps -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+        if (-not $p) { "no wps window (" + ((Get-Process wps -ErrorAction SilentlyContinue | Measure-Object).Count) + " procs)" }
+        else {
+            $h = [IntPtr]$p.MainWindowHandle
+            [void][Ui]::ShowWindow($h, 9); [void][Ui]::SetForegroundWindow($h)
+            Start-Sleep -Milliseconds 450
+            [void][Ui]::SetCursorPos($X, $Y)
+            Start-Sleep -Milliseconds 150
+            [Ui]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+            [Ui]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 500
+            if ($Out) { Take-Shot $Out }
+            "focused+clicked $X,$Y"
+        }
+    }
+    "focuskey" {
+        $p = Get-Process wps -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+        if (-not $p) { "no wps window" }
+        else {
+            $h = [IntPtr]$p.MainWindowHandle
+            [void][Ui]::ShowWindow($h, 9); [void][Ui]::SetForegroundWindow($h)
+            Start-Sleep -Milliseconds 450
+            [System.Windows.Forms.SendKeys]::SendWait($Text)
+            Start-Sleep -Milliseconds 300
+            if ($Out) { Take-Shot $Out }
+            "focused+sentkey $Text"
+        }
+    }
     "shotfocus" {
         $h = Find-Window $TitleMatch
         if ($h -ne [IntPtr]::Zero) { [void][Ui]::ShowWindow($h, 9); [void][Ui]::SetForegroundWindow($h); Start-Sleep -Milliseconds 800 }

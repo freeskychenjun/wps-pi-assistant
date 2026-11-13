@@ -30,3 +30,4 @@ tmp/*.json
 Thumbs.db
 desktop.ini
 .DS_Store
+tmp/*.txt

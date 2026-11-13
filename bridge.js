@@ -7,6 +7,9 @@
 //   POST /context  → {docKey} 切到该文档的 session，返回历史 [{role,text}]
 //   POST /prompt   → {message, docKey} 切 session 后发消息
 //   POST /stop     → 中止当前流
+//   POST /pane     → {docKey} 任务窗格心跳（登记「这个文档现在有活面板」）
+//   POST /docreq   → {req} agent 通过 pi-doc-tools.js 请求读文档，桥接转给面板并等结果
+//   POST /docresult→ {id, ok, text, error} 面板回传读取结果
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
@@ -22,7 +25,9 @@ const TOOL_LOG = path.join(__dirname, "tool-log.json");   // 每个会话的工�
 const CFG_FILE = path.join(__dirname, "bridge-config.json");   // 配置持久化（重启桥接不用再等面板重发）
 const SKILLS_DIR = path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".claude", "skills");
 // 允许 agent 使用的工具：只读文件系统 + 执行命令，不含 write/edit（改文档一律走 wps-* 指令块）
-const TOOL_ALLOW = "read,bash,ls,find,grep";
+// doc_info/doc_read/doc_find 来自 -e pi-doc-tools.js，必须列在这里，否则会被白名单挡掉
+const TOOL_ALLOW = "read,bash,ls,find,grep,doc_info,doc_read,doc_find";
+const DOC_TOOLS_EXT = path.join(__dirname, "pi-doc-tools.js");
 
 let piProc = null;
 let sseClients = [];
@@ -208,6 +213,40 @@ function broadcast(obj) {
     });
 }
 
+// ---------- 文档读取：agent 工具 → 面板（WPS JSAPI） → 回传 ----------
+// 面板每 5 秒 POST /pane 报一次 docKey，这里记住「哪些文档现在有活面板」
+const paneDocs = new Map();       // docKey → 最近心跳时间
+const docReadPending = new Map(); // 请求 id → {resolve, timer}
+const DOC_READ_TIMEOUT = 25000;   // 面板读一次文档最多等多久
+
+function paneAlive(docKey) {
+    const t = paneDocs.get(docKey);
+    return !!t && Date.now() - t < 60000;
+}
+
+// 把一次读取请求转给对应文档的面板，等面板回传（或超时）
+function requestDoc(req) {
+    return new Promise((resolve) => {
+        const docKey = req.docKey || turnDocKey || currentDocKey || "";
+        if (!docKey) {
+            return resolve({ ok: false, error: "还不知道当前是哪个文档：请先让用户发一条消息（面板会带上文档路径）。" });
+        }
+        if (!paneAlive(docKey)) {
+            return resolve({
+                ok: false,
+                error: "这份文档的任务窗格没有连着桥接（docKey=" + docKey + "）。请让用户确认 WPS 里这份文档右侧的 AI 面板是打开的。"
+            });
+        }
+        const id = "d" + ++reqSeq;
+        const timer = setTimeout(() => {
+            docReadPending.delete(id);
+            resolve({ ok: false, error: "任务窗格 " + Math.round(DOC_READ_TIMEOUT / 1000) + " 秒内没有回话（WPS 可能正忙或弹了对话框）。" });
+        }, DOC_READ_TIMEOUT);
+        docReadPending.set(id, { resolve, timer });
+        broadcast({ type: "docreq", id: id, docKey: docKey, req: req });
+    });
+}
+
 // Windows 下 shell:true 会多一层 cmd.exe，必须按进程树杀，否则 pi 变孤儿继续输出
 function killPi() {
     if (!piProc) return;
@@ -216,6 +255,8 @@ function killPi() {
     currentDocKey = null;
     for (const [, p] of pending) { clearTimeout(p.timer); p.resolve(null); }
     pending.clear();
+    for (const [, p] of docReadPending) { clearTimeout(p.timer); p.resolve({ ok: false, error: "pi 正在重启，读取中断。" }); }
+    docReadPending.clear();
     try {
         if (process.platform === "win32") {
             execSync("taskkill /PID " + proc.pid + " /T /F", { stdio: "ignore" });
@@ -266,6 +307,7 @@ function buildArgs(cfg) {
     const args = [
         "--mode", "rpc",
         "--no-extensions",        // 去掉 coding agent 的插件噪声
+        "-e", DOC_TOOLS_EXT,      // 显式加载本地扩展：doc_info/doc_read/doc_find（只读文档）
         "--skill", SKILLS_DIR,    // 加载 DSH/Claude 技能目录（改文档仍只走 wps-* 指令）
         "--tools", TOOL_ALLOW,    // 只开只读 + 执行类工具，不开 write/edit
         "--no-prompt-templates",
@@ -568,8 +610,36 @@ const server = http.createServer((req, res) => {
                 } catch {}
                 return json(200, { ok: true });
             }
-            if (req.url === "/skills") {
-                const list = listSkills(req.url.indexOf("force=1") >= 0);
+            // 面板心跳：登记「这份文档现在有活面板」，agent 读文档时用来定位
+            if (req.url === "/pane" && req.method === "POST") {
+                const k = data.docKey || "";
+                if (k) {
+                    const now = Date.now();
+                    paneDocs.set(k, now);
+                    for (const [key, t] of paneDocs) if (now - t > 600000) paneDocs.delete(key);
+                }
+                return json(200, { ok: true });
+            }
+            // agent 工具（pi-doc-tools.js）请求读文档：转给面板并等回传
+            if (req.url === "/docreq" && req.method === "POST") {
+                const reqObj = data.req || {};
+                const r = await requestDoc(reqObj);
+                try {
+                    fs.appendFileSync(path.join(__dirname, "debug.log"),
+                        "[" + new Date().toISOString() + "] docreq kind=" + (reqObj.kind || "")
+                        + " what=" + (reqObj.what || "") + " ok=" + (r.ok !== false)
+                        + " chars=" + ((r.text || "").length)
+                        + (r.error ? " error=" + r.error : "") + "\n", "utf8");
+                } catch {}
+                return json(200, { ok: r.ok !== false, text: r.text || "", error: r.error || "" });
+            }
+            // 面板回传读取结果：唤醒等着的工具调用
+            if (req.url === "/docresult" && req.method === "POST") {
+                const p = docReadPending.get(data.id);
+                if (p) { clearTimeout(p.timer); docReadPending.delete(data.id); p.resolve(data); }
+                return json(200, { ok: true });
+            }
+            if (req.url === "/skills") {                const list = listSkills(req.url.indexOf("force=1") >= 0);
                 return json(200, { ok: true, count: list.length, skills: list });
             }
             if (req.url === "/config" && req.method === "POST") {
@@ -667,8 +737,15 @@ const server = http.createServer((req, res) => {
                 }
                 fullText = "";
                 turnDocKey = data.docKey || null;
+                const promptMsg = data.message || "";
                 try {
-                    piProc.stdin.write(JSON.stringify({ type: "prompt", message: data.message || "" }) + "\n");
+                    fs.appendFileSync(path.join(__dirname, "debug.log"),
+                        "[" + new Date().toISOString() + "] prompt docKey=" + (turnDocKey || "")
+                        + " chars=" + promptMsg.length
+                        + " ctx=" + (promptMsg.indexOf("【当前文档】") >= 0 ? "yes" : "no") + "\n", "utf8");
+                } catch {}
+                try {
+                    piProc.stdin.write(JSON.stringify({ type: "prompt", message: promptMsg }) + "\n");
                 } catch (e) {
                     broadcast({ type: "error", error: "发送失败: " + e.message, docKey: turnDocKey });
                     return json(500, { ok: false });

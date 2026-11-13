@@ -234,51 +234,493 @@ function footnotesText(doc) {
     return arr.join("\n");
 }
 
-function getContext(mode) {
+// ---------- 文档读取接口（agent 按需调用 doc_info / doc_read / doc_find） ----------
+// v0.2：不再靠发送瞬间"猜"用户要哪段，改为给 agent 只读工具，由它按需读实时文档。
+var MAX_READ_CHARS = 8000;   // 单次读取默认上限；工具可传 maxChars，最高 30000
+
+// 段落号（1 起）；用 Range.Count 一次算，失败再线性数
+function paraIndexOf(doc, rangeStart) {
+    try { return Math.max(1, doc.Range(0, rangeStart).Paragraphs.Count); } catch (e) {}
+    try {
+        var n = doc.Paragraphs.Count;
+        for (var i = 1; i <= n; i++) {
+            if (doc.Paragraphs.Item(i).Range.Start >= rangeStart) return i;
+        }
+        return n;
+    } catch (e2) { return 0; }
+}
+
+// 表格序号（1 起）：最后一张开在 rangeStart 之前的表
+function tableIndexOf(doc, rangeStart) {
+    var idx = 0;
+    try {
+        var n = doc.Tables.Count;
+        for (var i = 1; i <= n; i++) {
+            var s = 0;
+            try { s = doc.Tables.Item(i).Range.Start; } catch (e) { continue; }
+            if (s <= rangeStart) idx = i; else break;
+        }
+    } catch (e2) {}
+    return idx;
+}
+
+// ---- 表格单元格读取（兼容合并单元格）----
+// 坑：WPS 里含合并单元格的表，tbl.Rows.Item(r) 可能返回 null，再取 .Cells 就抛
+// "Cannot read properties of null (reading 'Cells')"。所以统一走下面三个函数：
+// 先按行取（快）；某行取不到时退回 tbl.Range.Cells 建「网格」，缺格记为 merged。
+function tableGrid(tbl) {
+    var map = {}, maxR = 0, maxC = 0, got = 0;
+    try {
+        var cells = tbl.Range.Cells;
+        var n = cells.Count;
+        for (var i = 1; i <= n; i++) {
+            var cell = null;
+            try { cell = cells.Item(i); } catch (e) { continue; }
+            var r = 0, c = 0;
+            try { r = cell.RowIndex; c = cell.ColumnIndex; } catch (e2) {}
+            if (!r || !c) continue;
+            map[r + "," + c] = cell;
+            if (r > maxR) maxR = r;
+            if (c > maxC) maxC = c;
+            got++;
+        }
+    } catch (e3) {}
+    if (!got) {
+        // 再退一步：逐行取（对不含合并单元格的普通表通常都走这里之前的分支）
+        var rn = 0;
+        try { rn = tbl.Rows.Count; } catch (e4) {}
+        for (var r2 = 1; r2 <= rn; r2++) {
+            var rc = null;
+            try { rc = tbl.Rows.Item(r2).Cells; } catch (e5) {}
+            if (!rc) continue;
+            var cn = 0;
+            try { cn = rc.Count; } catch (e6) {}
+            for (var c2 = 1; c2 <= cn; c2++) {
+                var cell2 = null;
+                try { cell2 = rc.Item(c2); } catch (e7) { continue; }
+                map[r2 + "," + c2] = cell2;
+                if (c2 > maxC) maxC = c2;
+            }
+            if (r2 > maxR) maxR = r2;
+        }
+    }
+    return { rows: maxR, cols: maxC, get: function (r, c) { return map[r + "," + c] || null; } };
+}
+
+function tableCellText(cell) {
+    var t = "";
+    try { t = cleanText(cell.Range.Text).replace(/\n/g, " ").trim(); } catch (e) {}
+    return t;
+}
+
+// 读一行：{cells:[{col,text,cell,merged}], grid: 用到的网格或 null}
+// grid 传上一次的返回值可复用（同一张表逐行读时避免反复建网格）
+function rowCellsOf(tbl, r, grid) {
+    var out = [];
+    if (!grid) {
+        var rc = null;
+        try { rc = tbl.Rows.Item(r).Cells; } catch (e) { rc = null; }
+        if (rc) {
+            var cn = 0;
+            try { cn = rc.Count; } catch (e2) {}
+            for (var c = 1; c <= cn; c++) {
+                var cell = null;
+                try { cell = rc.Item(c); } catch (e3) { continue; }
+                out.push({ col: c, text: tableCellText(cell), cell: cell, merged: false });
+            }
+            return { cells: out, grid: null };
+        }
+    }
+    var g = grid || tableGrid(tbl);
+    for (var c2 = 1; c2 <= g.cols; c2++) {
+        var cell2 = g.get(r, c2);
+        if (!cell2) { out.push({ col: c2, text: "", cell: null, merged: true }); continue; }
+        out.push({ col: c2, text: tableCellText(cell2), cell: cell2, merged: false });
+    }
+    return { cells: out, grid: g };
+}
+
+function tableShape(tbl) {
+    var rows = 0, cols = 0;
+    try { rows = tbl.Rows.Count; } catch (e) {}
+    try { cols = tbl.Columns.Count; } catch (e2) {}
+    if (!rows || !cols) {
+        var g = tableGrid(tbl);
+        if (!rows) rows = g.rows;
+        if (!cols) cols = g.cols;
+    }
+    return { rows: rows, cols: cols };
+}
+
+function tableHeaderPreview(tbl, maxCols) {
+    var out = [];
+    var limit = maxCols || 8;
+    var row = rowCellsOf(tbl, 1, null);
+    var list = (row && row.cells) || [];
+    var n = Math.min(list.length, limit);
+    for (var i = 0; i < n; i++) {
+        out.push(list[i].merged ? "（合并）" : (list[i].text || "（空）"));
+    }
+    return out.join(" | ");
+}
+
+// 光标位置的一句话描述（段落号 / 表格行列）
+function cursorLabel(doc, sel) {
+    try {
+        var p = sel.Paragraphs.Item(1);
+        var pi = paraIndexOf(doc, p.Range.Start);
+        var txt = cleanText(p.Range.Text).replace(/\n/g, " ").trim();
+        var brief = txt ? "「" + txt.slice(0, 40) + (txt.length > 40 ? "…" : "") + "」" : "（空段落）";
+        if (cursorInTable(sel)) {
+            var tbl = sel.Tables.Item(1);
+            var ti = tableIndexOf(doc, tbl.Range.Start);
+            var tn = 0;
+            try { tn = doc.Tables.Count; } catch (e) {}
+            var row = 0, col = 0;
+            try { if (sel.Rows.Count) row = sel.Rows.Item(1).Index; } catch (e1) {}
+            try { if (sel.Columns.Count) col = sel.Columns.Item(1).Index; } catch (e2) {}
+            return "第 " + pi + " 段 → 表格 " + ti + "/" + tn
+                + (row ? " 第 " + row + " 行" : "") + (col ? " 第 " + col + " 列" : "")
+                + "（" + brief + "）";
+        }
+        return "第 " + pi + " 段 " + brief;
+    } catch (e) { return "（读不到光标位置）"; }
+}
+
+function readInfo() {
     var app = window.Application;
     var doc = app.ActiveDocument;
-    if (!doc || mode === "none") return null;
-    try {
-        var sel = app.Selection;
-        // 光标在表格里：段落/选区模式都升级成整表，单个单元格文本对 agent 没意义
-        if ((mode === "paragraph" || mode === "selection" || mode === "table") && cursorInTable(sel)) {
-            var tc = getTableContext(sel);
-            tc.text = tc.text.slice(0, MAX_CTX);
-            return tc;
+    if (!doc) throw new Error("当前没有打开的文档");
+    var sel = app.Selection;
+    var lines = [];
+    var name = "", dirty = false, paras = 0, chars = 0, tn = 0;
+    try { name = doc.Name || ""; } catch (e) {}
+    try { dirty = !doc.Saved; } catch (e) {}
+    try { paras = doc.Paragraphs.Count; } catch (e) {}
+    try { chars = doc.Content.Text.length; } catch (e) {}
+    try { tn = doc.Tables.Count; } catch (e) {}
+    lines.push("# 文档概览");
+    lines.push("- 文件名：" + (name || "（未命名）") + (dirty ? "（有未保存修改）" : ""));
+    lines.push("- 规模：" + paras + " 段，约 " + chars + " 字符");
+    var st = docStructure(doc);
+    if (st) lines.push("- 结构：" + st);
+    lines.push("- 光标：" + cursorLabel(doc, sel));
+    if (tn) {
+        lines.push("");
+        lines.push("## 表格清单（doc_read what=\"table\" index=<序号> 读整表）");
+        for (var i = 1; i <= Math.min(tn, 40); i++) {
+            var tbl = doc.Tables.Item(i);
+            var sh = tableShape(tbl);
+            lines.push(" " + i + ". " + sh.rows + " 行 × " + sh.cols + " 列 ｜ 首行：" + tableHeaderPreview(tbl, 8));
         }
-        if (mode === "selection") {
-            var t = cleanText(sel && sel.Text);
-            if (!t.trim()) return { label: "选区（空）", text: "" };
-            return { label: "选区", text: t.slice(0, MAX_CTX) };
-        }
-        if (mode === "paragraph") {
-            var p = sel.Paragraphs.Item(1);
-            var txt = cleanText(p.Range.Text);
-            return { label: "当前段落", text: txt.slice(0, MAX_CTX) };
-        }
-        if (mode === "doc") {
-            var full = cleanText(doc.Content.Text);
-            var cnt = "";
-            try { cnt = "，" + doc.Paragraphs.Count + " 段"; } catch (e2) {}
-            var body = full.slice(0, MAX_CTX);
-            var fn = footnotesText(doc);
-            if (fn) body += "\n\n【脚注】\n" + fn;
-            return { label: "全文" + cnt, text: body, truncated: full.length > MAX_CTX };
-        }
-    } catch (e) {
-        return { label: "上下文读取失败", text: "", error: e.message };
+        if (tn > 40) lines.push(" …（共 " + tn + " 张，只列前 40 张；doc_read what=\"table\" index=41 可继续读）");
     }
-    return null;
+    if (paras > 20) {
+        lines.push("");
+        lines.push("- 提示：标题大纲用 doc_read what=\"outline\"，全文用 what=\"all\"，检索用 doc_find。");
+    }
+    return lines.join("\n");
+}
+
+function readParagraph(doc, index, maxChars, atCursor) {
+    var total = 0;
+    try { total = doc.Paragraphs.Count; } catch (e) {}
+    var i = index || paraIndexOf(doc, window.Application.Selection.Paragraphs.Item(1).Range.Start);
+    if (!i || i < 1 || i > total) throw new Error("段落号超出范围（共 " + total + " 段）：" + (index || i));
+    var p = doc.Paragraphs.Item(i);
+    var txt = cleanText(p.Range.Text);
+    var body = txt ? txt.slice(0, maxChars) : "（空段落）";
+    if (txt && txt.length > maxChars) body += "\n…（本段共 " + txt.length + " 字，已截断到 " + maxChars + " 字）";
+    return "【第 " + i + "/" + total + " 段" + (atCursor ? "（光标处）" : "") + "】\n" + body;
+}
+
+function readParagraphs(doc, start, end, maxChars) {
+    var total = 0;
+    try { total = doc.Paragraphs.Count; } catch (e) {}
+    var a = Math.max(1, start || 1);
+    var b = end ? Math.min(end, total) : Math.min(a + 49, total);
+    var lines = ["【第 " + a + "–" + b + " 段，共 " + total + " 段】"];
+    var used = 0, truncated = false;
+    for (var i = a; i <= b; i++) {
+        var t = cleanText(doc.Paragraphs.Item(i).Range.Text).replace(/\n/g, " ").trim();
+        var line = "[" + i + "] " + t;
+        used += line.length + 1;
+        lines.push(line);
+        if (used >= maxChars) { truncated = true; break; }
+    }
+    if (truncated) lines.push("…（已截断；用 start/end 分段读）");
+    return lines.join("\n");
+}
+
+function readTable(doc, index, req, atCursor) {
+    var n = 0;
+    try { n = doc.Tables.Count; } catch (e) {}
+    if (!n) throw new Error("文档里没有表格");
+    var ti = index;
+    if (!ti) {
+        try { ti = tableIndexOf(doc, window.Application.Selection.Tables.Item(1).Range.Start); } catch (e) {}
+    }
+    if (!ti) throw new Error("光标不在表格里，请给出 index（1–" + n + "）");
+    if (ti > n) throw new Error("表格序号超出范围（共 " + n + " 张）：" + ti);
+    var tbl = doc.Tables.Item(ti);
+    var sh = tableShape(tbl);
+    var a = Math.max(1, req.startRow || 1);
+    var b = req.endRow ? Math.min(req.endRow, sh.rows) : sh.rows;
+    var maxChars = Math.min(Math.max(req.maxChars || MAX_READ_CHARS, 200), 30000);
+    var lines = ["【表格 " + ti + "/" + n + (atCursor ? "（光标处）" : "") + "："
+        + sh.rows + " 行 × " + sh.cols + " 列"
+        + (a > 1 || b < sh.rows ? "，本次第 " + a + "–" + b + " 行" : "")
+        + "；行号在行首，单元格以 | 分隔】"];
+    var empties = [], used = 0, truncated = false, grid = null;
+    for (var r = a; r <= b; r++) {
+        var arr = [];
+        var rc = rowCellsOf(tbl, r, grid);
+        grid = rc.grid;
+        var cellList = rc.cells || [];
+        for (var k = 0; k < cellList.length; k++) {
+            var ci = cellList[k];
+            if (ci.merged) { arr.push("（合并）"); continue; }
+            arr.push(ci.text);
+            if (!ci.text) empties.push({ r: r, c: ci.col });
+        }
+        var line = r + " | " + arr.join(" | ");
+        used += line.length + 1;
+        lines.push(line);
+        if (used >= maxChars) { truncated = true; break; }
+    }
+    if (truncated) lines.push("…（已截断；用 startRow/endRow 分段读）");
+    if (empties.length) {
+        var shown = [];
+        for (var e2 = 0; e2 < empties.length && e2 < 60; e2++) shown.push("第 " + empties[e2].r + " 行第 " + empties[e2].c + " 列");
+        lines.push("");
+        lines.push("空单元格（" + empties.length + " 个）：" + shown.join("、") + (empties.length > 60 ? " …" : ""));
+        lines.push("要填这些格子没有可 find 的文字锚点，改用 wps-cells 按行列号写，例如：");
+        lines.push("```wps-cells\n{\"cells\":[{\"table\":" + ti + ",\"row\":" + empties[0].r + ",\"col\":" + empties[0].c + ",\"text\":\"要填的内容\"}]}\n```");
+    }
+    return lines.join("\n");
+}
+
+function readOutline(doc, maxChars) {
+    var total = 0;
+    try { total = doc.Paragraphs.Count; } catch (e) {}
+    var lines = ["【标题大纲】（共 " + total + " 段，只列标题样式段落；格式 段号｜样式｜标题）"];
+    var used = 0, found = 0, truncated = false;
+    for (var i = 1; i <= total; i++) {
+        var p = doc.Paragraphs.Item(i);
+        var style = "";
+        try { style = String(p.Style.NameLocal || ""); } catch (e) {}
+        if (!/^(标题|Heading)\s*[1-9]/i.test(style)) continue;
+        var t = cleanText(p.Range.Text).replace(/\n/g, " ").trim();
+        var line = "[" + i + "] " + style + "｜" + t;
+        used += line.length + 1;
+        lines.push(line);
+        found++;
+        if (used >= maxChars) { truncated = true; break; }
+    }
+    if (!found) lines.push("（没有识别到标题样式段落；可用 doc_read what=\"all\" 或按段落号读）");
+    if (truncated) lines.push("…（已截断）");
+    return lines.join("\n");
+}
+
+function readAll(doc, maxChars) {
+    var full = "";
+    var paras = 0;
+    try { full = cleanText(doc.Content.Text); } catch (e) {}
+    try { paras = doc.Paragraphs.Count; } catch (e) {}
+    var cut = full.length > maxChars;
+    var lines = ["【全文：" + paras + " 段，约 " + full.length + " 字符"
+        + (cut ? "；已截断到 " + maxChars + " 字，其余用 what=\"paragraphs\" 分段读" : "") + "】"];
+    lines.push(full.slice(0, maxChars));
+    var fn = footnotesText(doc);
+    if (fn) lines.push("", "【脚注】", fn);
+    return lines.join("\n");
+}
+
+function findText(req) {
+    var app = window.Application;
+    var doc = app.ActiveDocument;
+    if (!doc) throw new Error("当前没有打开的文档");
+    var q = String(req.query || "");
+    if (!q) throw new Error("query 不能为空");
+    var maxHits = Math.min(Math.max(req.maxHits || 10, 1), 50);
+    var scope = req.scope || "all";
+    var hits = [];
+    if (scope === "all" || scope === "paragraphs") {
+        var n = 0;
+        try { n = doc.Paragraphs.Count; } catch (e) {}
+        for (var i = 1; i <= n && hits.length < maxHits; i++) {
+            // 表格里的段落由下面的「表格扫描」负责，这里跳过，避免同一处命中两次（挤占 maxHits）
+            var pr = null;
+            try { pr = doc.Paragraphs.Item(i).Range; } catch (e) {}
+            if (!pr) continue;
+            var inTbl = false;
+            try { inTbl = !!pr.Information(12); } catch (e) {}
+            if (inTbl) continue;
+            var raw = cleanText(pr.Text);
+            var pos = raw.indexOf(q);
+            if (pos < 0) continue;
+            var flat = raw.replace(/\s+/g, " ").trim();
+            if (flat.length > 160) {
+                var s0 = Math.max(0, pos - 50);
+                flat = "…" + raw.replace(/\s+/g, " ").slice(s0, s0 + 140).trim() + "…";
+            }
+            hits.push("第 " + i + " 段：" + flat);
+        }
+    }
+    if ((scope === "all" || scope === "tables") && hits.length < maxHits) {
+        var tn = 0;
+        try { tn = doc.Tables.Count; } catch (e) {}
+        for (var ti = 1; ti <= tn && hits.length < maxHits; ti++) {
+            var tbl = null;
+            try { tbl = doc.Tables.Item(ti); } catch (e0) { continue; }
+            // 单张表读不到（合并单元格异常等）就跳过，不能让整次检索失败
+            var rn = 0;
+            try { rn = tableShape(tbl).rows; } catch (e1) { continue; }
+            var grid = null;
+            for (var r = 1; r <= rn && hits.length < maxHits; r++) {
+                var rc;
+                try { rc = rowCellsOf(tbl, r, grid); } catch (e2) { break; }
+                grid = rc.grid;
+                var list = rc.cells || [];
+                for (var k = 0; k < list.length && hits.length < maxHits; k++) {
+                    var ct = list[k].text;
+                    if (!ct || ct.indexOf(q) < 0) continue;
+                    hits.push("表格 " + ti + " 第 " + r + " 行第 " + list[k].col + " 列：" + ct.slice(0, 140));
+                }
+            }
+        }
+    }
+    var head = "【检索「" + q + "」：命中 " + hits.length + " 条"
+        + (hits.length >= maxHits ? "（达到上限 " + maxHits + "）" : "") + "】";
+    return hits.length ? head + "\n" + hits.join("\n") : head;
+}
+
+// 面板侧统一入口：bridge 转来一条读取请求
+function handleDocReq(req) {
+    req = req || {};
+    var kind = req.kind || (req.what ? "read" : "info");
+    try {
+        if (kind === "info") return { ok: true, text: readInfo() };
+        if (kind === "read") {
+            var what = req.what || "selection";
+            var maxChars = Math.min(Math.max(req.maxChars || MAX_READ_CHARS, 200), 30000);
+            var app = window.Application;
+            var doc = app.ActiveDocument;
+            if (!doc) throw new Error("当前没有打开的文档");
+            var sel = app.Selection;
+            if (what === "selection") {
+                if (cursorInTable(sel)) return { ok: true, text: readTable(doc, 0, req, true) };
+                var t = cleanText(sel && sel.Text);
+                if (t.trim()) return { ok: true, text: "【选中内容：" + t.length + " 字】\n" + t.slice(0, maxChars) };
+                return { ok: true, text: readParagraph(doc, 0, maxChars, true) };
+            }
+            if (what === "paragraph") return { ok: true, text: readParagraph(doc, req.index || 0, maxChars, false) };
+            if (what === "paragraphs") return { ok: true, text: readParagraphs(doc, req.start || 1, req.end || 0, maxChars) };
+            if (what === "table") return { ok: true, text: readTable(doc, req.index || 0, req, false) };
+            if (what === "outline") return { ok: true, text: readOutline(doc, maxChars) };
+            if (what === "all") return { ok: true, text: readAll(doc, maxChars) };
+            throw new Error("未知读取类型：" + what);
+        }
+        if (kind === "find") return { ok: true, text: findText(req) };
+        if (kind === "dev_cell") {
+            var dd = window.Application.ActiveDocument;
+            if (!dd) throw new Error("当前没有打开的文档");
+            var dt = dd.Tables.Item(req.table || 1);
+            var drc = rowCellsOf(dt, req.row || 1, null);
+            var dl = drc.cells || [], dh = null;
+            for (var dz = 0; dz < dl.length; dz++) if (dl[dz].col === (req.col || 1)) { dh = dl[dz]; break; }
+            if (!dh || !dh.cell) return { ok: true, text: "no cell merged=" + (dh ? dh.merged : "?") };
+            var drv = dh.cell.Range, dtext = String(drv.Text || ""), dcodes = [];
+            for (var dz2 = 0; dz2 < dtext.length; dz2++) dcodes.push(dtext.charCodeAt(dz2));
+            var dlines = ["text=" + JSON.stringify(dtext), "codes=" + dcodes.join(","),
+                "range=" + drv.Start + ".." + drv.End, "track=" + dd.TrackRevisions];
+            var drevs = [];
+            try {
+                var dcs = dd.Revisions, dcn = dcs.Count;
+                for (var dz3 = 1; dz3 <= dcn; dz3++) {
+                    var dv = dcs.Item(dz3), dvr = dv.Range;
+                    drevs.push(dv.Type + "@" + dvr.Start + "-" + dvr.End + " " + JSON.stringify(String(dvr.Text || "").slice(0, 24)));
+                }
+            } catch (dz4) { drevs.push("ERR " + dz4.message); }
+            dlines.push("revs(" + drevs.length + ")=" + drevs.join(" | "));
+            return { ok: true, text: dlines.join("\n") };
+        }
+        if (kind === "dev_cells") {
+            beginTurn();
+            var devRep = applyCells(req.cells || []);
+            endTurn();
+            return { ok: true, text: devRep };
+        }
+        if (kind === "dev_undo") {
+            undoLastTurn();
+            return { ok: true, text: "undo invoked" };
+        }
+        return { ok: false, error: "未知读取类型：" + kind };
+    } catch (e) {
+        return { ok: false, error: (e && e.message) || String(e) };
+    }
+}
+
+// 收到 bridge 的 docreq：读本地文档 → POST /docresult 回传
+function serveDocReq(msg) {
+    if (!msg || !msg.id) return;
+    if (msg.docKey && msg.docKey !== getDocKey()) return;   // 多文档隔离：只答自己这份
+    var r = handleDocReq(msg.req);
+    fetch(BRIDGE + "/docresult", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: msg.id, ok: !!r.ok, text: r.text || "", error: r.error || "" })
+    }).catch(function () {});
+}
+
+// 面板心跳：让桥接知道「这份文档现在有活面板」，agent 的 doc_* 读取请求才投得过来
+function paneBeat() {
+    fetch(BRIDGE + "/pane", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docKey: getDocKey() })
+    }).catch(function () {});
+}
+
+// ---------- 发送时附带的常驻摘要（小、总是有，够 agent 判断改哪儿） ----------
+function buildAutoContext() {
+    var doc = window.Application.ActiveDocument;
+    if (!doc) return { label: "未附带", text: "", error: "当前没有打开的文档" };
+    try {
+        var sel = window.Application.Selection;
+        var lines = [];
+        var name = "", dirty = false, paras = 0, tn = 0;
+        try { name = doc.Name || ""; } catch (e) {}
+        try { dirty = !doc.Saved; } catch (e) {}
+        try { paras = doc.Paragraphs.Count; } catch (e) {}
+        try { tn = doc.Tables.Count; } catch (e) {}
+        lines.push("- 文件：" + (name || "（未命名）") + (dirty ? "（有未保存修改）" : ""));
+        lines.push("- 规模：" + paras + " 段，" + tn + " 个表格");
+        lines.push("- 光标：" + cursorLabel(doc, sel));
+        var body;
+        if (cursorInTable(sel)) {
+            body = readTable(doc, 0, { startRow: 1 }, true);
+        } else {
+            var t = cleanText(sel && sel.Text);
+            if (t.trim()) body = "【选中内容：" + t.length + " 字】\n" + t.slice(0, 1500);
+            else body = readParagraph(doc, 0, 1500, true);
+        }
+        lines.push("");
+        lines.push(body.length > 1600 ? body.slice(0, 1600) + "\n…（已截断）" : body);
+        lines.push("");
+        lines.push("（以上只是光标处摘要；需要其他段落/表格/全文，用 doc_info、doc_read、doc_find 工具按需读取。）");
+        return { label: "光标处摘要", text: lines.join("\n") };
+    } catch (e) {
+        return { label: "未附带", text: "", error: e.message };
+    }
 }
 
 function buildMessage(userText, ctx) {
-    if (!ctx || !ctx.text) return userText;
-    var s = "【当前文档上下文 · " + ctx.label + (ctx.truncated ? "，已截断" : "") + "】\n";
-    s += "<<<\n" + ctx.text + "\n>>>\n\n";
-    try {
-        var st = docStructure(window.Application.ActiveDocument);
-        if (st) s += "【文档结构】" + st + "\n\n";
-    } catch (e) {}
+    var s = "";
+    if (ctx && ctx.text) {
+        s += "【当前文档】\n" + ctx.text + "\n\n";
+    } else {
+        s += "【当前文档】未附带（" + ((ctx && ctx.error) || "读不到文档") + "）。"
+            + "需要文档内容时用 doc_info / doc_read / doc_find 工具读取。\n\n";
+    }
     s += "【用户需求】\n" + userText;
     return s;
 }
@@ -550,13 +992,14 @@ function sendMsg() {
         }
         hideCmdMenu();
 
-        var mode = $("ctxMode").value;
-        var ctx = getContext(mode);
-        if (ctx && ctx.error) { addMsg("sys", "⚠ 读文档失败：" + ctx.error); }
+        var ctx = buildAutoContext();
+        if (ctx && ctx.error) { addMsg("sys", "⚠ 读文档失败：" + ctx.error + "（已按「未附带」发送）"); }
 
         input.value = "";
         input.style.height = "";
-        var ctxNote = (ctx && ctx.text) ? "\n（附带" + ctx.label + "，共 " + ctx.text.length + " 字）" : "";
+        var ctxNote = (ctx && ctx.text)
+            ? "\n（附带" + ctx.label + "，共 " + ctx.text.length + " 字；其余内容由 agent 用工具按需读取）"
+            : "\n（未附带文档内容：agent 需用 doc_* 工具读取）";
         addMsg("user", display + ctxNote);
         setTitleMark(true);
         setStatus(forceSkill ? ("正在使用技能 " + forceSkill.name + "…") : "pi 正在处理…");
@@ -692,6 +1135,81 @@ function applyEdits(edits) {
     return report.join("\n");
 }
 
+// ---------- 按行列号写单元格（空单元格没有 find 锚点，只能按位置写） ----------
+// 只替换单元格正文，保留末尾的「段落标记 + 单元格标记」，避免把表结构写坏
+function setCellText(doc, cell, text) {
+    var rg = null;
+    try { rg = cell.Range; } catch (e) { return false; }
+    var s = 0, e = 0, raw = "";
+    try { s = rg.Start; e = rg.End; raw = String(rg.Text || ""); } catch (e2) { return false; }
+    // 末尾的「段落标记 + 单元格标记」要保留，只替换正文。
+    // 坑：WPS 里 cell.Range.Text 会带上单元格标记（\u0007），但 Range.End 不含它，
+    // 所以按 raw 算出的 cut 要扣掉「在 Range 之外」的那部分，否则会少删一位（实测留个尾字）。
+    var cut = 0;
+    for (var ci = raw.length - 1; ci >= 0 && cut < 3; ci--) {
+        var ch = raw.charAt(ci);
+        if (ch === "\r" || ch === "\n" || ch === "\u0007") cut++; else break;
+    }
+    var span = Math.max(0, e - s);
+    var extra = raw.length - span;              // 正常为 1（\u0007 不在 End 之内）
+    if (extra > 0) cut = Math.max(0, cut - extra);
+    var target = null;
+    var stop = Math.max(s, e - cut);
+    try { target = doc.Range(s, stop); } catch (e3) {
+        try { rg.SetRange(s, stop); target = rg; } catch (e4) { return false; }
+    }
+    if (!target) return false;
+    target.Text = String(text);
+    return true;
+}
+
+// cells: [{table:5, row:5, col:3, text:"215"}] —— table 为 1 起的表格序号（doc_info 里的编号）
+function applyCells(cells) {
+    var doc = window.Application.ActiveDocument;
+    if (!doc) return "⚠ 没有打开的文档";
+    var report = [];
+    try { doc.TrackRevisions = true; } catch (e) {}
+    var tn = 0;
+    try { tn = doc.Tables.Count; } catch (e2) {}
+    if (!tn) return "⚠ 文档里没有表格";
+    var gridCache = {};       // 表格序号 → 网格（同一张表多个格子时复用）
+    var written = 0;
+
+    for (var i = 0; i < cells.length; i++) {
+        var it = cells[i] || {};
+        var ti = parseInt(it.table, 10);
+        var row = parseInt(it.row, 10);
+        var col = parseInt(it.col, 10);
+        var head = "第" + (i + 1) + "条";
+        if (!(ti >= 1 && ti <= tn)) { report.push("✗ " + head + "：表格序号 " + it.table + " 无效（共 " + tn + " 张）"); continue; }
+        if (!(row >= 1) || !(col >= 1)) { report.push("✗ " + head + "：缺 row / col（行列号从 1 起）"); continue; }
+        try {
+            var tbl = doc.Tables.Item(ti);
+            var rn = tableShape(tbl).rows;
+            if (row > rn) { report.push("✗ " + head + "：表格 " + ti + " 只有 " + rn + " 行，第 " + row + " 行越界"); continue; }
+            var rc = rowCellsOf(tbl, row, gridCache[ti] || null);
+            if (rc.grid && !gridCache[ti]) gridCache[ti] = rc.grid;
+            var target = null;
+            var list = rc.cells || [];
+            for (var k = 0; k < list.length; k++) if (list[k].col === col) { target = list[k]; break; }
+            if (!target) { report.push("✗ " + head + "：表格 " + ti + " 第 " + row + " 行没有第 " + col + " 列"); continue; }
+            if (target.merged || !target.cell) { report.push("✗ " + head + "：表格 " + ti + " 第 " + row + " 行第 " + col + " 列是合并单元格的一部分，不能单独写入（改用 wps-edits 按锚点文字改）"); continue; }
+            var old = target.text || "";
+            var val = (it.text === undefined || it.text === null) ? "" : String(it.text);
+            if (!setCellText(doc, target.cell, val)) { report.push("✗ " + head + "：写入表格 " + ti + " 第 " + row + " 行第 " + col + " 列失败"); continue; }
+            ensureTurn().cellWrites.push({ table: ti, row: row, col: col, old: old, neu: val });
+            written++;
+            var brief = val.length > 24 ? val.slice(0, 24) + "…" : val;
+            report.push("✎ 表格 " + ti + " 第 " + row + " 行第 " + col + " 列 ← " + (brief || "（清空）") + (old ? "　（原：" + (old.length > 16 ? old.slice(0, 16) + "…" : old) + "）" : ""));
+        } catch (e) {
+            report.push("✗ " + head + "：执行出错 " + (e && e.message ? e.message : e));
+        }
+    }
+    if (written) report.push("（共写入 " + written + " 个单元格，已开修订；点「撤销上轮AI修订」可写回原值）");
+    nudgeRepaint();
+    return report.join("\n") || "（没有可写入的单元格）";
+}
+
 // ---------- 批注 ----------
 function applyComments(comments) {
     var doc = window.Application.ActiveDocument;
@@ -739,17 +1257,16 @@ function findCellByText(doc, text) {
         var tbl;
         try { tbl = doc.Tables.Item(t); } catch (e1) { continue; }
         var rn = 0;
-        try { rn = tbl.Rows.Count; } catch (e2) { continue; }
+        try { rn = tableShape(tbl).rows; } catch (e2) { continue; }
+        var grid = null;
         for (var r = 1; r <= rn; r++) {
-            var cells;
-            try { cells = tbl.Rows.Item(r).Cells; } catch (e3) { continue; }
-            var cn = 0;
-            try { cn = cells.Count; } catch (e4) { continue; }
-            for (var c = 1; c <= cn; c++) {
-                var cell;
-                try { cell = cells.Item(c); } catch (e5) { continue; }
-                if (cleanText(cell.Range.Text).indexOf(text) >= 0) {
-                    return { table: tbl, row: r, col: c, rows: rn };
+            var rc;
+            try { rc = rowCellsOf(tbl, r, grid); } catch (e3) { break; }
+            grid = rc.grid;
+            var list = rc.cells || [];
+            for (var k = 0; k < list.length; k++) {
+                if (list[k].text && list[k].text.indexOf(text) >= 0) {
+                    return { table: tbl, tableIndex: t, row: r, col: list[k].col, rows: rn };
                 }
             }
         }
@@ -819,6 +1336,10 @@ function parseTables(text) {
 function parseOps(text) {
     var r = parseBlock(text, "wps-tableops");
     return { ops: r.data ? (r.data.ops || []) : null, clean: r.clean };
+}
+function parseCells(text) {
+    var r = parseBlock(text, "wps-cells");
+    return { cells: r.data ? (r.data.cells || []) : null, clean: r.clean };
 }
 function parseParas(text) {
     var r = parseBlock(text, "wps-paragraphs");
@@ -1077,8 +1598,9 @@ function beginTurn() { curTurn = null; }
 
 function ensureTurn() {
     if (!curTurn) {
-        curTurn = { docKey: getDocKey(), rev: null, edits: [], comments: [], rows: [] };
+        curTurn = { docKey: getDocKey(), rev: null, edits: [], comments: [], rows: [], cellWrites: [] };
     }
+    if (!curTurn.cellWrites) curTurn.cellWrites = [];
     return curTurn;
 }
 
@@ -1086,7 +1608,7 @@ function endTurn() {
     var t = curTurn;
     curTurn = null;
     if (!t) return;
-    if (!t.rev && !t.edits.length && !t.comments.length && !t.rows.length && !t.struct) return;
+    if (!t.rev && !t.edits.length && !t.comments.length && !t.rows.length && !(t.cellWrites && t.cellWrites.length) && !t.struct) return;
     undoStack.push(t);
     if (undoStack.length > UNDO_MAX) undoStack.shift();
     updateUndoBtn();
@@ -1145,7 +1667,23 @@ function undoLastTurn() {
         } catch (e) {}
     }
 
-    // 3) 文本级还原：按本轮记录的 find/replace 反向改回文字
+    // 3) 单元格写入：按行列号把原值写回去
+    var cellsBack = 0;
+    var cwList = ent.cellWrites || [];
+    for (var w = cwList.length - 1; w >= 0; w--) {
+        try {
+            var cw = cwList[w];
+            var tb = doc.Tables.Item(cw.table);
+            var rcw = rowCellsOf(tb, cw.row, null);
+            var lst = rcw.cells || [];
+            var tgt = null;
+            for (var kk = 0; kk < lst.length; kk++) if (lst[kk].col === cw.col) { tgt = lst[kk]; break; }
+            if (!tgt || !tgt.cell) { unrecoverable++; continue; }
+            if (setCellText(doc, tgt.cell, cw.old)) cellsBack++; else unrecoverable++;
+        } catch (e) { unrecoverable++; }
+    }
+
+    // 4) 文本级还原：按本轮记录的 find/replace 反向改回文字
     for (var k2 = ent.edits.length - 1; k2 >= 0; k2--) {
         var ed = ent.edits[k2];
         try {
@@ -1183,6 +1721,7 @@ function undoLastTurn() {
     var parts = [];
     if (rowsDel) parts.push("删除表格行 " + rowsDel + " 行");
     if (cmtDel) parts.push("删除批注 " + cmtDel + " 条");
+    if (cellsBack) parts.push("写回单元格 " + cellsBack + " 个");
     if (reverted) parts.push("还原文本 " + reverted + " 处");
     if (unrecoverable) parts.push("删除类改动 " + unrecoverable + " 处需在「审阅」里手动拒绝");
     if (ent.struct) parts.push("表格结构改动 " + ent.struct + " 处需在 WPS 里按 Ctrl+Z 逐步回退");
@@ -1369,6 +1908,7 @@ function connectSSE() {
         try { d = JSON.parse(e.data); } catch (err) { return; }
         // 多文档隔离：桥接是单 pi 进程，SSE 全局广播；属于别的文档的事件直接丢弃，
         // 避免 A 文档的回复/修订被写进当前 B 文档
+        if (d.type === "docreq") { serveDocReq(d); return; }   // agent 请求读文档：本地读，回传
         if (d.docKey && lastDocKey && d.docKey !== lastDocKey &&
             (d.type === "delta" || d.type === "done" || d.type === "error" || d.type === "tool")) {
             if (d.type === "done") { aiBuf = ""; aiDiv = null; setTitleMark(false); }
@@ -1408,13 +1948,14 @@ function connectSSE() {
             var tbls = parseTables(imgs.clean);
             var opsb = parseOps(tbls.clean);
             var prb = parseParas(opsb.clean);
+            var clb = parseCells(prb.clean);
             aiBuf = "";
             if (aiDiv) {
-                if (prb.clean && prb.clean.trim()) aiDiv.textContent = prb.clean;
+                if (clb.clean && clb.clean.trim()) aiDiv.textContent = clb.clean;
                 else if (aiDiv.parentNode) aiDiv.parentNode.removeChild(aiDiv);  // 工具轮次没留下文字就别留空气泡
                 aiDiv = null;
             }
-            else if (prb.clean) addMsg("ai", prb.clean);
+            else if (clb.clean) addMsg("ai", clb.clean);
             setTitleMark(false);
             var did = [];
             beginTurn();
@@ -1445,6 +1986,10 @@ function connectSSE() {
             if (prb.paras && prb.paras.length) {
                 addMsg("edit", applyParas(prb.paras));
                 did.push("插入段落 " + prb.paras.length + " 组");
+            }
+            if (clb.cells && clb.cells.length) {
+                addMsg("edit", applyCells(clb.cells));
+                did.push("填写单元格 " + clb.cells.length + " 个");
             }
             endTurn();
             setStatus(did.length ? "AI 已" + did.join("、") + "，可在「审阅」中处理" : "");
@@ -1494,6 +2039,9 @@ window.onload = function () {
         .catch(function () {});
     // 轮询文档切换（WPS 的 ApiEvent 覆盖不稳定，轮询最可靠）
     setInterval(function () { syncDoc(false); }, 2000);
+    // 告诉桥接「这份文档有活面板」（agent 的 doc_* 工具靠它定位），并定期续约
+    paneBeat();
+    setInterval(paneBeat, 5000);
     // 面板加载后静默跑一次能力探测，结果只写 bridge 日志（排错用，不打扰聊天区）
     setTimeout(function () { try { runProbe(true); } catch (e) {} }, 2500);
     // 打开侧栏就能直接打字：自动把焦点放到输入框

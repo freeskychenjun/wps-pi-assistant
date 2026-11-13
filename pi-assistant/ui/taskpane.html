@@ -3,6 +3,7 @@
 
 <head>
     <meta charset="utf-8">
+    <meta name="ver" content="p10">
 </head>
 <script type="text/javascript" src="../js/util.js"></script>
 <script type="text/javascript" src="../js/taskpane.js"></script>
@@ -49,7 +50,7 @@
             <div class="hint" id="emptyHint">
                 <div class="hintIcon">✎</div>
                 <div>把光标放到要改的段落，直接说要改什么</div>
-                <div class="hintEg">「改得更正式一些」<br>「精简到 15 字以内」<br>「在表后说明后加一段：复核人：陈鋆」</div>
+                <div class="hintEg">「改得更正式一些」<br>「把这张表的空单元格补上」<br>「全文里把 2024 改成 2025」<br>「在表后说明后加一段：复核人：陈鋆」</div>
             </div>
         </main>
 
@@ -59,13 +60,7 @@
             <textarea id="userInput" rows="2" oninput="onInputChange(this)"
                 placeholder="说说要改什么，Ctrl+Enter 发送；输入 / 呼出技能"></textarea>
             <div class="bar">
-                <select id="ctxMode" title="自动附带哪些文档内容">
-                    <option value="selection">选中内容</option>
-                    <option value="paragraph" selected>当前段落</option>
-                    <option value="table">当前表格</option>
-                    <option value="doc">全文</option>
-                    <option value="none">不附带</option>
-                </select>
+                <span class="autoTip" title="发送时会附上光标处的段落或表格摘要；agent 需要别的内容会自己用只读工具读取（段落/表格/大纲/全文/检索）">自动读取文档 · 光标处摘要</span>
                 <div class="btns">
                     <button class="btn ghost" onclick="stopPi()" title="停止当前生成">停止</button>
                     <button class="btn primary" onclick="sendMsg()">发送</button>
@@ -508,6 +503,17 @@
 
     select:focus {
         border-color: #8fb3ff;
+    }
+
+    .autoTip {
+        flex: 1 1 auto;
+        min-width: 0;
+        font-size: 11.6px;
+        color: #8a919b;
+        line-height: 1.35;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .btns {

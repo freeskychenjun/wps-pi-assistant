@@ -135,6 +135,21 @@
 - Excel/PPT 端复用同一守护进程，文档操作层各写一套。
 - 分发定案：同事内网分发（publish 或企业部署，视 P0 结论）；可选商店发布。
 
+### P8 取消上下文下拉、改为按需读文档（已完成 2026-11-12）
+- 动机：旧版由面板在发送瞬间抓「选中/段落/表格/全文」，抓不到就**静默裸发**（用户选了整张表提问，agent 收到 0 字上下文，答"看不到表格"）。
+- 做法 ①：面板**永远**附「光标处摘要」（文件名/规模/光标位置/所在段落或整表预览，≤1500 字）+ 结尾提示"其余内容用工具按需读取"；`ctxMode` 下拉已删除，`taskpane.html` 改为「自动读取文档 · 光标处摘要」。
+- 做法 ②：新增 pi 扩展 `pi-doc-tools.js`（`pi -e` 加载，工具名加入 `TOOL_ALLOW`），注册三个**只读**工具 `doc_info` / `doc_read` / `doc_find`；调用链 = 工具 → `POST /docreq`（bridge 记 pending 并 SSE 广播）→ 面板用 WPS JSAPI 读 → `POST /docresult` 回传。另加 `POST /pane` 心跳（60s 未心跳快速失败"任务窗格未连接"）。
+- 验证（2026-11-12 13:00–13:25 实测）：`doc_info` 概览、`doc_read what=table`（带行号+空单元格清单）、`doc_find` 0 命中后如实说"不在本文档"；**用户原始场景**（空单元格表 + "把空单元格补上"）agent 读表后列出 7 个空单元格并逐格给建议，未改文档。
+- 已知限制：`doc_read` 单次返回默认 8000 字（`maxChars` 可到 30000，超长会明确提示"已截断，用 paragraphs 分段读"）；`doc_find` 是**子串精确匹配**（区分大小写，中文不受影响），搜的是**全文**（全部段落 + 全部表格单元格），返回每条命中截到 140 字、默认最多 10 条（`maxHits` 可到 50），不搜页眉页脚/文本框/批注/脚注；文档改动仍必须走面板修订写回。
+
+### P9 合并单元格表可读 + 空单元格可按行列号写（已完成 2026-11-13）
+- 动机（用户 2026-11-13 报）：读表能读到内容，但"填不进数据"——空单元格没有可 `find` 的文字锚点，旧协议（`wps-edits`/`wps-rows`/`wps-tableops`）全是锚点式，改不了空格子；同时合并单元格表整表读取直接报 `Cannot read properties of null (reading 'Cells')`（WPS 对合并表 `tbl.Rows.Item(r)` 返回 null），连带 `doc_find` 扫表也 500。
+- 做法 ①（读）：新增 `tableGrid(tbl)`（优先枚举 `tbl.Range.Cells` 用 `Cell.RowIndex/ColumnIndex` 建 r,c→cell 映射，退回逐行 Cells）+ `rowCellsOf`/`tableCellText`；`readTable`/`findText`/`tableHeaderPreview`/`findCellByText` 全部改走网格：合并区显示「（合并）」，单表读失败只跳过该表不再让整次检索失败；回归样本 `test-p8-merged.docx`（`make-p8-merged.py`）。
+- 做法 ②（写）：新增 `wps-cells` 代码块 `{"cells":[{"table":5,"row":5,"col":3,"text":"215"}]}` + `applyCells()`；`setCellText()` 只替换单元格正文、保留末尾「段落标记 + 单元格标记」，自动开修订，并记入 `undoStack[].cellWrites`；撤销时按行列号把原值写回（实测可干净回到空格子）。
+- 踩坑：WPS 的 `cell.Range.Text` 会带上单元格标记 `\u0007`，但 `Range.End` 不含它 → 按文本长度算截断位会少删一位（撤销后残留"3"这种尾巴）；修法 = `cut` 按 `Range.End - Range.Start` 与文本长度之差校正。另一个坑：面板 webview 不能热重载——关侧栏重开无效，必须**重启 WPS 进程**（`htmlVer` 从 p9→p10 才算生效）。
+- 验证（2026-11-13 09:00–09:25）：合并表 info/读表/检索全部 ok；真实 UI 路径（整表选中 → "把第 5 行五个空单元格填上"）agent 调 `doc_read` + 输出 `wps-cells`，5 格写入成功（213/165/155/131/114，红色修订），Ctrl+Shift+Z 撤销后 5 格干净回到空。
+- 调试入口：`/docreq` 额外支持 `dev_cell`（转储单元格文本/范围/修订）、`dev_cells`（直接跑 applyCells）、`dev_undo`（跑撤销），仅供本机回归脚本 `test-cells.js` 使用。
+
 ## 4. 主要风险与预案
 
 | # | 风险 | 等级 | 预案 |
