@@ -149,13 +149,6 @@
 - 踩坑：WPS 的 `cell.Range.Text` 会带上单元格标记 `\u0007`，但 `Range.End` 不含它 → 按文本长度算截断位会少删一位（撤销后残留"3"这种尾巴）；修法 = `cut` 按 `Range.End - Range.Start` 与文本长度之差校正。另一个坑：面板 webview 不能热重载——关侧栏重开无效，必须**重启 WPS 进程**（`htmlVer` 从 p9→p10 才算生效）。
 - 验证（2026-11-13 09:00–09:25）：合并表 info/读表/检索全部 ok；真实 UI 路径（整表选中 → "把第 5 行五个空单元格填上"）agent 调 `doc_read` + 输出 `wps-cells`，5 格写入成功（213/165/155/131/114，红色修订），Ctrl+Shift+Z 撤销后 5 格干净回到空。
 - 调试入口：`/docreq` 额外支持 `dev_cell`（转储单元格文本/范围/修订）、`dev_cells`（直接跑 applyCells）、`dev_undo`（跑撤销），仅供本机回归脚本 `test-cells.js` 使用。
-### P10 全文体检（lint）+ 定位跳转（已完成 2026-11-13）
-- 动机：自检/校审要在几千段里找「见表 7 但全文没有表 7」「m3/s 与 m³/s 混写」这类结构问题。面板加「体检」按钮：一次扫全文出清单，每条带「定位」一点跳到段落/单元格；同时给 agent `doc_lint` 工具，形成"先体检 → 逐条 doc_read 核对上下文 → 确定的按修订改、拿不准的加批注"。
-- 面板侧：`taskpane.js` 新增 `lintDoc()`（8 条规则）、`renderLint()`（渲染到 `#lintBox`，高/中/低 chip + 定位链接，最多 80 条）、`runLint()` / `hideLint()` / `askAiFixLint()`（把前 40 条拼成需求发给 agent）、`jumpTo(anchor)`（`Paragraphs.Item(n)` / `Tables.Item(t).Cell(r,c)` → Select + `ScrollIntoView`）。规则：表/图编号跳号与重复、正文引用悬空（只认"见/如/参见/详见/据/根据"等前置词）、表格前无表名、有表名但后面没表格、中文段落里混英文标点、连续重复段落、单位写法混用（m3/s 与 m³/s、万m³、km²、m²）、表格空单元格（逐表列出首个空格位置）。标题行显示「体检：正文 N 段 / N 字，表格 N 个｜高 x · 中 y · 低 z」。
-- agent 侧：`pi-doc-tools.js` 新增 `doc_lint`（`maxItems` 1～80），`bridge.js` 的 `TOOL_ALLOW` 加 `doc_lint`；system prompt 增加铁律「体检结果只是线索，逐条 `doc_read` 核对，拿不准加批注，不要为了消灭条目改坏正文」。
-- 样本/验证：`make-lint-test.py` → `test-lint.docx`（13 段、3 表、埋 10 处问题）；探针 `tmp\probe-lint.js` 实测 33ms 返回 10 项（高 3 / 中 2 / 低 5，引用悬空表 7、图 3，表编号缺 2，单位混写，表名缺失，英文逗号，半角括号，重复段落，两表空单元格）；真实 UI 点「体检」清单正常显示，点第一条「定位」文档滚到第 19 段并选中；面板 `htmlVer` 升到 p12。
-- 踩坑：①面板 webview 必须**重启 WPS** 才加载新 html（判据是 `debug.log` 里 PROBE 的 `dom.htmlVer`）；②UI 自动化点击要"激活 + 移动 + 按下/抬起"在**同一个 powershell 进程**内完成（DSH 窗口会抢前台），按钮坐标先截图裁剪量准（实测按钮中心 1602,1006）；③`.ps1` 必须纯 ASCII（PS 5.1 按 ANSI 解码无 BOM 文件，中文注释会报 Unexpected token）；④写 HTML 用 `[System.IO.File]::WriteAllText(... UTF8Encoding($false))` 去 BOM。
-- 暂未做：「定位」只选中目标文本，没有独立高亮层；体检规则偏"结构可判"，「数值是否合理」这类语义问题仍交给 agent + 技能。
 
 ## 4. 主要风险与预案
 

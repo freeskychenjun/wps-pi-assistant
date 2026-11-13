@@ -176,36 +176,4 @@ export default function docToolsExtension(pi) {
 			}
 		},
 	});
-
-	pi.registerTool({
-		name: "doc_lint",
-		label: "全文体检",
-		description:
-			"对用户当前 WPS 文档做一次只读的全文体检，返回问题清单（带段落号/表格行列号）：" +
-			"表/图编号重复与跳号、正文引用了不存在的表/图（引用悬空）、表格前面缺表名、" +
-			"单位写法前后不一致（如 m3/s 与 m³/s 混用）、中文里的英文标点、与上一段完全重复的段落、" +
-			"以及每张表的空单元格数量。用户提到校审、检查、体检、找问题时先调它。",
-		promptSnippet: "全文体检当前 WPS 文档（编号/引用/表名/单位/标点/重复段落/空单元格）",
-		promptGuidelines: [
-			"用户要校审、检查、找问题时，先 doc_lint 拿问题清单，再用 doc_read 读命中位置核对，不要凭清单直接改。",
-			"doc_lint 返回的是线索不是结论：拿不准的加批注说明，不要为了消灭条目而改坏正文。",
-		],
-		parameters: {
-			type: "object",
-			properties: {
-				maxItems: { type: "number", description: "最多返回多少条问题，默认 30，最大 80" },
-			},
-			additionalProperties: false,
-		},
-		async execute(_toolCallId, params) {
-			try {
-				return {
-					content: [{ type: "text", text: await askPane({ kind: "lint", ...params }) }],
-					details: {},
-				};
-			} catch (e) {
-				return fail(e.message);
-			}
-		},
-	});
 }
