@@ -1,6 +1,7 @@
 # 造一个"大文档"性能样本：800 段正文 + 20 张表，用于测 doc_find / doc_read 的耗时与截断
-from docx import Document
+import os
 import random
+from docx import Document
 
 random.seed(20261112)
 doc = Document()
@@ -31,5 +32,5 @@ for t in range(1, 21):
         table.cell(3, 1).text = "乐平枢纽"
 
 doc.add_paragraph("本文档结束。")
-doc.save(r"D:\DSH工作区\wps-pi-plugin\test-p8-big.docx")
+doc.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-p8-big.docx"))
 print("saved test-p8-big.docx")

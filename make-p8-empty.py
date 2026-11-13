@@ -1,4 +1,5 @@
 # 造一个"有空单元格的表格"测试文档：验证 doc_read 能列出空单元格、agent 能填
+import os
 from docx import Document
 from docx.shared import Pt
 
@@ -18,5 +19,5 @@ for r, row in enumerate(data):
     for c, val in enumerate(row):
         table.cell(r, c).text = val
 doc.add_paragraph("表后说明：以上为示例数据，需核对。")
-doc.save(r"D:\DSH工作区\wps-pi-plugin\test-p8-empty.docx")
+doc.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-p8-empty.docx"))
 print("saved test-p8-empty.docx")

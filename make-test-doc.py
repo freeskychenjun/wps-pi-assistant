@@ -1,3 +1,4 @@
+import os
 import docx
 from docx.shared import Pt
 
@@ -18,5 +19,5 @@ for r, row in enumerate(data):
         t.cell(r, c).text = v
 
 d.add_paragraph("表后说明：以上为示例数据，需核对。")
-d.save(r"D:\DSH工作区\wps-pi-plugin\test-table.docx")
+d.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-table.docx"))
 print("saved")

@@ -45,6 +45,9 @@ let reqSeq = 0;
 const pending = new Map();     // rpc 请求 id → {resolve, timer}
 
 try { fs.mkdirSync(SESS_DIR, { recursive: true }); } catch {}
+// 临时文件目录：pi 的工作目录是插件目录，统一让 agent 把临时文件写这里（已 gitignore）
+const TMP_DIR = path.join(__dirname, "tmp");
+try { fs.mkdirSync(TMP_DIR, { recursive: true }); } catch {}
 
 function loadCfg() {
     try { return JSON.parse(fs.readFileSync(CFG_FILE, "utf8")); } catch { return {}; }

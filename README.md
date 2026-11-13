@@ -4,6 +4,8 @@
 
 不依赖 DSH，只要本机有 Node + pi 即可用。
 
+> **分发给同事**：把整个插件目录拷过去即可，**代码里没有写死盘符或绝对路径**——插件目录放哪都行（带中文、空格也可以）。对方机器只需：① 有 Node.js（≥18）和 `pi` 命令；② 在 `%APPDATA%\kingsoft\wps\jsaddons\publish.xml` 里加一行 `<jspluginonline name="pi-assistant" type="wps" url="http://127.0.0.1:3987/addin/" enable="enable_dev"/>`；③ 双击 `start-bridge.cmd`，WPS 里首次信任加载项；④ 在侧栏「模型配置」填自己的 provider/model/API Key（每台机器各配各的，`bridge-config.json` 不进 git）。技能目录 `%USERPROFILE%\.claude\skills` 是可选的，没有也能用（只是少了那批技能）。
+
 ---
 
 ## 一、启动（两步，之后不用再管）
@@ -104,7 +106,7 @@
 
 **安全边界**：pi 只开了**只读 + 执行**类工具（`read` / `ls` / `find` / `grep` / `bash`），**没有** `write` / `edit`——它不能直接改盘，所有文档改动必须经过「侧栏 → 修订写回」这条路。system prompt 里也明令禁止用 bash 去改 .docx/.xlsx、或调用 `docx-paragraph-polish` / `minimax-docx` 这类**离线改磁盘文件**的技能（那些技能改的是磁盘副本，你眼前这份文档不会变）。
 
-**临时文件约定**：pi 的工作目录就是本插件目录（`bridge.js` 里 `spawn(..., cwd: __dirname)`），所以 agent 写的临时文件默认会落在仓库根目录。system prompt 已要求它**一律写到 `tmp\`**（文件名带任务前缀）、**任务结束自己删掉**，不写根目录、不写 `sessions\`、不写用户文档所在目录；要留给你看的产物（图/表/报告）用它任务里指定的绝对路径，不进 `tmp\`。`tmp/` 已在 `.gitignore` 里，临时文件不会污染 `git status`。
+**临时文件约定**：pi 的工作目录就是本插件目录（`bridge.js` 里 `spawn(..., cwd: __dirname)`，不写死路径，目录搬到哪都跟着走），所以 agent 写的临时文件默认会落在仓库根目录。system prompt 已要求它**一律写到相对路径 `tmp\`**（文件名带任务前缀）、**任务结束自己删掉**，不写根目录、不写 `sessions\`、不写用户文档所在目录；要留给你看的产物（图/表/报告）用它任务里指定的绝对路径，不进 `tmp\`。`tmp/` 由 bridge 启动时自动创建，并已在 `.gitignore` 里，临时文件不会污染 `git status`。
 
 ---
 
@@ -191,7 +193,7 @@
 生产模式改完代码要重启 WPS 才能生效（加载项页面在 WPS 里缓存）。要热更新就用 wpsjs 的开发服务：
 
 ```powershell
-cd "D:\DSH工作区\wps-pi-plugin\pi-assistant"
+cd "<插件所在目录>\pi-assistant"
 wpsjs debug      # 起 vite 开发服务 :3889，带 HMR
 ```
 
@@ -201,10 +203,10 @@ wpsjs debug      # 起 vite 开发服务 :3889，带 HMR
 
 ## 七、版本管理（git）
 
-本项目已用 git 管理，仓库就在 `D:\DSH工作区\wps-pi-plugin`（分支 `main`）。
+本项目已用 git 管理，仓库就在插件目录（分支 `main`；把整个目录拷到别的机器/别的盘符也能直接用，没有写死路径）。
 
 ```powershell
-cd "D:\DSH工作区\wps-pi-plugin"
+cd "<插件所在目录>"
 git status                  # 看改了什么
 git add -A
 git commit -m "说明这次改了什么"

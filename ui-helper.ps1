@@ -2,10 +2,12 @@ param(
     [string]$Action = "shot",
     [int]$X = 0,
     [int]$Y = 0,
-    [string]$Out = "D:\DSH工作区\wps-pi-plugin\shot.png",
+    [string]$Out = "",
     [string]$TitleMatch = "",
     [string]$Text = ""
 )
+
+if (-not $Out) { $Out = Join-Path $PSScriptRoot "shot.png" }
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing

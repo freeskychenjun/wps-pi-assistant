@@ -2,6 +2,7 @@
 #   - 复现 WPS 里 tbl.Rows.Item(r) 返回 null → "Cannot read properties of null (reading 'Cells')"
 #   - 验证 doc_read 能读出合并位置（（合并））与空单元格清单
 #   - 验证 wps-cells 能按行列号把数据填进空格子
+import os
 from docx import Document
 
 doc = Document()
@@ -38,5 +39,5 @@ t.cell(4, 7).text = "本次复核"
 t.cell(4, 8).text = "本次计算"
 
 doc.add_paragraph("表后说明：第 5 行有 5 个空单元格，需按计算结果补全。")
-doc.save(r"D:\DSH工作区\wps-pi-plugin\test-p8-merged.docx")
+doc.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-p8-merged.docx"))
 print("saved test-p8-merged.docx")
