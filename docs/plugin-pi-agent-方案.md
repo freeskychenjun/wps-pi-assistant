@@ -309,3 +309,19 @@
 - 强杀桥接：徽标 6 秒内变红「桥接未运行」，聊天区出现一条指引消息（双击 start-bridge.cmd / 自启会自动起 / 恢复后自动重连）；
 - 看门狗 30–42 秒内拉起新进程（`bridge-watchdog.log` 有记录、新进程 SessionId=0），面板 `EventSource` 自动重连、徽标回到绿色「已连接」，**无需重启 WPS**；
 - 徽标三态的数据源是 `/health`（`piRunning`），不再靠 `onopen` 无脑写绿；`es.onopen` 里补发 `/config`（仅当本机 PluginStorage 里有配置时才发；桥接侧 `/config` 会写 `debug.log` 的 `config provider=… model=…` 行，便于排查）。
+
+### P19 手动启动不再弹控制台窗口（已完成 2026-11-14）
+
+**问题（用户报告）**：双击 `start-bridge.cmd`（或它被 `install-addin.cmd` 调用）后，屏幕上留下一个 cmd 窗口，内容是 `bridge listening on 127.0.0.1:3987` / `[bridge] auto-start pi: …`，关掉它桥接就跟着退出了。
+
+**根因**：旧版用 `start "pi-bridge" /min cmd /c "node bridge.js >> bridge.log 2>&1"` —— `start` 只是让窗口**最小化**，窗口仍然存在、且是桥接的控制台；node 的 stdout 也直接打在这个窗口里。加 `/b` 或 `start "" /min` 都不能真正隐藏（仍会创建控制台）。
+
+**做法**：
+- 新增 `start-bridge.ps1`（纯 ASCII）：`Start-Process -FilePath cmd.exe -ArgumentList '/d /s /c "node bridge.js >> bridge.log 2>&1"' -WorkingDirectory $PSScriptRoot -WindowStyle Hidden` —— 以 `SW_HIDE` 创建进程，node 继承的是一个**隐藏**控制台，屏幕上不会出现窗口；输出照旧落 `bridge.log`。
+- `start-bridge.cmd` 改为调用它（`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-bridge.ps1" %*`），探测端口与 FAILED 提示逻辑不变；新增 `-Show` 开关（透传给 ps1）用于调试时开可见窗口。
+- 用 `$PSScriptRoot` 传目录，避免含中文的路径经过 cmd.exe 被编码搞坏。
+- `pack-release.ps1` 白名单加 `start-bridge.ps1`。
+
+**踩坑**：`if errorlevel 1 ( ... echo ... (start-bridge.ps1) ... )` 里的括号会被 cmd 当成块的结束符，报 `. was unexpected at this time.`（整段解析失败、退出码 255）→ 括号内的 echo 文案不能出现半角 `(` `)`。
+
+**验证**：杀掉桥接 → `cmd /c start-bridge.cmd` → 输出 `bridge started`、退出码 0、`/health ok:true piRunning:true`，窗口枚举里**没有**任何 bridge/cmd 窗口；`start-bridge.cmd -Show` 才会弹可见窗口；看门狗/S4U 自启本来就不产生窗口。

@@ -19,12 +19,24 @@ if not errorlevel 1 (
     exit /b 0
 )
 
-echo [pi-assistant] starting bridge (minimized window, log: bridge.log) ...
-rem Redirect the child's stdout/stderr to bridge.log for two reasons:
-rem  - when this script is started from another process, an inherited console
-rem    handle would keep the parent's pipe open (parent looks "hung");
-rem  - after a crash the console window is gone, so the log is the only clue.
-start "pi-bridge" /min cmd /c "node bridge.js >> bridge.log 2>&1"
+echo [pi-assistant] starting bridge in the background (no window, log: bridge.log) ...
+rem The bridge must not own a visible console:
+rem  - a console window would pop up on every start (and on every watchdog restart);
+rem  - when this script is called from another process, an inherited console handle
+rem    keeps the parent's pipe open (parent looks "hung").
+rem start-bridge.ps1 does Start-Process -WindowStyle Hidden, so node gets a hidden
+rem console. Its stdout/stderr go to bridge.log (the only clue after a crash).
+rem Need to see the live output?  start-bridge.cmd -Show
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-bridge.ps1" %*
+if errorlevel 1 (
+    echo.
+    echo [pi-assistant] could not launch the background starter start-bridge.ps1.
+    echo                Run it directly in PowerShell to see the reason:
+    echo                  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-bridge.ps1" -Show
+    echo.
+    pause
+    exit /b 1
+)
 
 for /l %%i in (1,1,15) do (
     ping -n 1 -w 400 127.0.0.1 >nul

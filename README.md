@@ -16,13 +16,15 @@
 
 ### 1. 启动桥接服务
 
-双击 `start-bridge.cmd`。看到下面这行就说明起来了：
+双击 `start-bridge.cmd`。**它不会再弹窗**（桥接在后台跑，控制台窗口是隐藏的），看到下面这行就说明起来了：
 
 ```
 [pi-assistant] bridge started on 127.0.0.1:3987
 ```
 
 重复双击是安全的，会提示 `already running`。启动失败时它**不会**再谎报成功，而是打印 `FAILED: nothing is listening on 127.0.0.1:3987` 并给出排查方向（端口被占 / Node 太旧 / 杀软拦截），同时把桥接自己的输出写进 `bridge.log`。
+
+> 想**看实时输出**调试：用 `start-bridge.cmd -Show`（会开一个可见的控制台窗口），或直接在插件目录里运行 `node bridge.js`。日常启动不要带 `-Show`，否则那个窗口会一直挂着。
 
 > 桥接进程同时干两件事：① 管 pi 子进程、转发流式输出；② **直接托管加载项页面**（http://127.0.0.1:3987/addin/）。所以它必须在 WPS 之前或同时起来——它没起，WPS 里的「AI 助手」选项卡就打不开侧栏。
 
@@ -196,7 +198,7 @@ Get-Process wps | Select-Object Id, StartTime, MainWindowTitle
 | `sessions-map.json` | 文档 → 会话文件的映射（自动生成） |
 | `tool-log.json` | 每条回复用过哪些工具/技能的记录（供「历史」显示「⚙ 用过 bash」） |
 | `bridge-config.json` | 桥接记住的模型配置（有 provider/model 时自动生成，桥接重启后自动拉起 pi） |
-| `start-bridge.cmd` | 一键启动桥接（幂等；成功/失败都会真探测端口，输出落 `bridge.log`） |
+| `start-bridge.cmd` / `start-bridge.ps1` | 一键启动桥接（幂等；失败会真探测端口并打印 FAILED，输出落 `bridge.log`）。桥接在**隐藏**控制台里跑，不会弹窗；调试用 `start-bridge.cmd -Show` 看实时输出 |
 | `watch-bridge.cmd` | 每分钟由计划任务调用：3987 没监听就重启桥接任务（看门狗，纯 ASCII） |
 | `bridge.log` / `bridge-watchdog.log` | 桥接的控制台输出 / 看门狗拉起记录（排错用，已 gitignore） |
 | `install-addin.cmd` / `install-addin.ps1` | 一键注册加载项（写 `%APPDATA%\kingsoft\wps\jsaddons\publish.xml`，自动备份、幂等合并、支持 `-Remove` 卸载、`-DryRun` 预览；`.cmd` 注册完顺手启动桥接） |
@@ -324,7 +326,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 # 版本号默认取最近的 git 标签，也可 -Version 0.2.2
 ```
 
-产出 `dist\wps-pi-assistant-v<版本>.zip`（约 70 KB / 22 个文件）。里面只有**生产必需**的文件：`bridge.js`、`pi-doc-tools.js`、`doc-assistant-prompt.md`、`start-bridge.cmd`、`watch-bridge.cmd`、`install-addin.cmd/.ps1`、`README.md`，以及 `pi-assistant/` 的 `index.html`、`main.js`、`manifest.xml`、`ribbon.xml`、`js/`、`ui/`、`images/`。
+产出 `dist\wps-pi-assistant-v<版本>.zip`（约 100 KB / 23 个文件）。里面只有**生产必需**的文件：`bridge.js`、`pi-doc-tools.js`、`doc-assistant-prompt.md`、`start-bridge.cmd`、`start-bridge.ps1`、`watch-bridge.cmd`、`install-addin.cmd/.ps1`、`README.md`，以及 `pi-assistant/` 的 `index.html`、`main.js`、`manifest.xml`、`ribbon.xml`、`js/`、`ui/`、`images/`。
 
 **不含**：`pi-assistant/node_modules`（71 MB，只有 `wpsjs debug` 开发模式要）、`package.json`/`vite.config.js`、`sessions/`、`tmp/`、测试样本、日志、`bridge-config.json`（可能含 API Key）。脚本最后会自检：关键文件在、`node_modules` 和 `bridge-config.json` 没混进去、zip 能生成。
 

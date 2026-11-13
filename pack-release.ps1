@@ -50,6 +50,7 @@ $files = @(
     "pi-doc-tools.js",
     "doc-assistant-prompt.md",
     "start-bridge.cmd",
+    "start-bridge.ps1",
     "install-addin.ps1",
     "watch-bridge.cmd",
     "install-addin.cmd",
