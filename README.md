@@ -302,3 +302,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 > 开发模式（`wpsjs debug`）仍需要 `npm i` 装 `pi-assistant/node_modules`，这只在开发机上做，不进发布包。
 
 开发方案文档就在本仓库：`docs\plugin-pi-agent-方案.md`（含需求分析、架构、协议、P0–P16 各阶段结果与踩坑记录）。
+
+---
+
+## 九、许可
+
+MIT License，见 [LICENSE](LICENSE)。可自由使用、修改、分发（含商用），保留版权声明即可。
