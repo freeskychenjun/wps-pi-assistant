@@ -178,4 +178,35 @@ export default function docToolsExtension(pi) {
 			}
 		},
 	});
+
+	pi.registerTool({
+		name: "doc_eval",
+		label: "自定义只读查询",
+		description:
+			"在任务窗格里执行一段【只读】的 WPS JSAPI 代码并返回结果（JSON 序列化）。可用变量：app（window.Application）、doc（app.ActiveDocument）。" +
+			"doc_info/doc_read/doc_find 覆盖不到的读取需求（字体颜色、脚注格式、域代码、样式细节等）用它现场写查询。写入类代码会被拒绝。",
+		promptSnippet: "执行一段只读 JSAPI 代码，读 doc_info/doc_read/doc_find 拿不到的信息",
+		promptGuidelines: [
+			"需要读的属性没有现成工具时（如 Font.Color、脚注、样式定义）用 doc_eval，代码要短小、只读、分小步。",
+			"doc_eval 不能写入文档；改文档永远用 wps-* 代码块。",
+		],
+		parameters: {
+			type: "object",
+			properties: {
+				code: { type: "string", description: "只读 JSAPI 代码（≤4000 字符），最后一条表达式的值作为返回结果；可用变量 app、doc" },
+			},
+			required: ["code"],
+			additionalProperties: false,
+		},
+		async execute(_toolCallId, params) {
+			try {
+				return {
+					content: [{ type: "text", text: await askPane({ kind: "eval", code: String(params.code || "") }) }],
+					details: {},
+				};
+			} catch (e) {
+				return fail(e.message);
+			}
+		},
+	});
 }

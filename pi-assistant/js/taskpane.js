@@ -893,6 +893,27 @@ function handleDocReq(req) {
             throw new Error("未知读取类型：" + what);
         }
         if (kind === "find") return { ok: true, text: findText(req) };
+        if (kind === "eval") {
+            var evCode = String(req.code || "");
+            if (!evCode.trim()) return { ok: false, error: "code 不能为空" };
+            if (evCode.length > 4000) return { ok: false, error: "code 超过 4000 字符上限（拆小步）" };
+            if (/TrackRevisions|\.Save(As)?\s*\(|\.Delete\s*\(|\.Paste|\.Copy\s*\(|FileCopy|WScript|Shell\s*\(|\.Add\s*\(/.test(evCode))
+                return { ok: false, error: "doc_eval 只允许只读代码（检测到写入/系统调用迹象）；要改文档请用 wps-* 代码块" };
+            var evApp = window.Application;
+            var evDoc = evApp.ActiveDocument;
+            if (!evDoc) return { ok: false, error: "当前没有打开的文档" };
+            var evFn;
+            try { evFn = new Function("app", "doc", "\"use strict\";\n" + evCode); } catch (evE1) { return { ok: false, error: "代码解析失败：" + evE1.message }; }
+            var evR;
+            try { evR = evFn(evApp, evDoc); } catch (evE2) { return { ok: false, error: "执行失败：" + evE2.message }; }
+            var evOut;
+            if (typeof evR === "string") evOut = evR;
+            else if (evR === undefined || evR === null) evOut = String(evR);
+            else { try { evOut = JSON.stringify(evR, function (k, v) { return v; }, 1); } catch (evE3) { evOut = String(evR); } }
+            if (evOut === undefined || evOut === null) evOut = String(evOut);
+            if (evOut.length > 8000) evOut = evOut.slice(0, 8000) + "…（已截断）";
+            return { ok: true, text: evOut };
+        }
         if (kind === "dev_cell") {
             var dd = window.Application.ActiveDocument;
             if (!dd) throw new Error("当前没有打开的文档");

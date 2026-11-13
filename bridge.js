@@ -26,7 +26,7 @@ const CFG_FILE = path.join(__dirname, "bridge-config.json");   // 配置持久�
 const SKILLS_DIR = path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".claude", "skills");
 // 允许 agent 使用的工具：只读文件系统 + 执行命令，不含 write/edit（改文档一律走 wps-* 指令块）
 // doc_info/doc_read/doc_find 来自 -e pi-doc-tools.js，必须列在这里，否则会被白名单挡掉
-const TOOL_ALLOW = "read,bash,ls,find,grep,doc_info,doc_read,doc_find";
+const TOOL_ALLOW = "read,bash,ls,find,grep,doc_info,doc_read,doc_find,doc_eval";
 const DOC_TOOLS_EXT = path.join(__dirname, "pi-doc-tools.js");
 
 let piProc = null;
