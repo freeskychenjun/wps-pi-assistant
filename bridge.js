@@ -23,7 +23,7 @@ const SESS_DIR = path.join(__dirname, "sessions");
 const MAP_FILE = path.join(__dirname, "sessions-map.json");
 const TOOL_LOG = path.join(__dirname, "tool-log.json");   // 每个会话的工具调用记录 {会话文件: [{i: 第几条回复, tools: [...]}]}
 const CFG_FILE = path.join(__dirname, "bridge-config.json");   // 配置持久化（重启桥接不用再等面板重发）
-const SKILLS_DIR = path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".claude", "skills");
+const SKILLS_DIR = path.join(process.env.USERPROFILE || process.env.HOME || "", ".claude", "skills");
 // 允许 agent 使用的工具：只读文件系统 + 执行命令，不含 write/edit（改文档一律走 wps-* 指令块）
 // doc_info/doc_read/doc_find 来自 -e pi-doc-tools.js，必须列在这里，否则会被白名单挡掉
 const TOOL_ALLOW = "read,bash,ls,find,grep,doc_info,doc_read,doc_find,doc_eval";

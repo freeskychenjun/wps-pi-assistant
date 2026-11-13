@@ -1,7 +1,7 @@
 // 文档读取性能探针：直接打 bridge /docreq，测面板真实读取耗时（不需要 LLM）
 // 用法：先起 bridge、在 WPS 里打开一份大文档（如 python make-p8-big.py 生成的 test-p8-big.docx），再 node test-docperf.js
 const http = require("http");
-const DOC_KEY = process.env.DOC_KEY || "D:\\DSH工作区\\wps-pi-plugin\\test-p8-big.docx";
+const DOC_KEY = process.env.DOC_KEY || require("path").join(__dirname, "test-p8-big.docx");
 
 function post(path, obj, timeoutMs) {
     return new Promise((resolve, reject) => {
@@ -23,7 +23,7 @@ function post(path, obj, timeoutMs) {
 }
 
 const cases = [
-    ["find 乐平枢纽", { kind: "find", query: "乐平枢纽", docKey: DOC_KEY }],
+    ["find 示例水库", { kind: "find", query: "示例水库", docKey: DOC_KEY }],
     ["find 水位 (默认上限)", { kind: "find", query: "水位", docKey: DOC_KEY }],
     ["find 水位 maxHits=50", { kind: "find", query: "水位", maxHits: 50, docKey: DOC_KEY }],
     ["find 不存在的词", { kind: "find", query: "zzz不存在zzz", docKey: DOC_KEY }],

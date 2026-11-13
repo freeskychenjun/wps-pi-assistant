@@ -1,6 +1,6 @@
 // Debug harness: dump cell -> applyCells -> dump -> undo -> dump
 const http = require("http");
-const DOC_KEY = process.env.DOC_KEY || "D:\\DSH工作区\\wps-pi-plugin\\test-p8-merged.docx";
+const DOC_KEY = process.env.DOC_KEY || require("path").join(__dirname, "test-p8-merged.docx");
 
 function post(path, obj) {
     return new Promise((resolve, reject) => {

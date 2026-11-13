@@ -20,11 +20,11 @@ sec.header_distance = Cm(1.5)
 sec.footer_distance = Cm(1.75)
 
 hp = sec.header.paragraphs[0]
-hp.text = "乐平枢纽下闸蓄水设计自检报告（送审稿）"
+hp.text = "示例工程自检报告（送审稿）"
 hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 fp = sec.footer.paragraphs[0]
-fp.text = "水文分院　2026 年 11 月"
+fp.text = "某某分院　2026 年 11 月"
 fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 t = doc.add_heading("P16 排版能力测试", level=1)

@@ -103,7 +103,7 @@
 
 改页眉/页脚里的文字，先用 `doc_read what="layout"` 读现状（`layout` 会列出六种页眉页脚的实际文字）。代码块：
 ```wps-headerfooter
-{"hfs":[{"part":"header","find":"送审稿","replace":"报批稿"},{"part":"footer","text":"水文分院　2026 年 12 月"}]}
+{"hfs":[{"part":"header","find":"送审稿","replace":"报批稿"},{"part":"footer","text":"某某分院　2026 年 12 月"}]}
 ```
 - `part` 取 `header`（页眉）、`footer`（页脚）、`firstHeader`/`firstFooter`（首页）、`evenHeader`/`evenFooter`（偶数页）；省略则按 `header` 处理。
 - 有 `find` 就做局部替换（find 必须逐字取自该页眉/页脚文字）；只给 `text` 则整段改写文字。

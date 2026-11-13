@@ -15,7 +15,7 @@ t = doc.add_table(rows=rows, cols=cols)
 t.style = "Table Grid"
 
 # 第 1 行：标题横跨全部列
-t.cell(0, 0).merge(t.cell(0, cols - 1)).text = "乐平枢纽坝址年径流频率计算成果表"
+t.cell(0, 0).merge(t.cell(0, cols - 1)).text = "示例水库坝址年径流频率计算成果表"
 
 # 第 2–3 行：项目 / 单位 / 备注 / 成果来源 纵向合并，中间是各频率列
 t.cell(1, 0).merge(t.cell(2, 0)).text = "项目"

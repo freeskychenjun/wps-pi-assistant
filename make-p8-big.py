@@ -10,7 +10,7 @@ doc.add_paragraph("P8 大文档性能测试", style="Title")
 filler = "本段为性能测试占位正文，内容与工程无关，仅用于把文档撑大以测量读取与检索耗时。"
 for i in range(1, 801):
     if i == 650:
-        doc.add_paragraph("第 650 段特殊标记：乐平枢纽下闸蓄水设计自检报告（用于检索命中测试）。")
+        doc.add_paragraph("第 650 段特殊标记：示例工程自检报告（用于检索命中测试）。")
     elif i % 40 == 0:
         doc.add_heading("第 %d 节 测试小节标题" % (i // 40), level=2)
     else:
@@ -29,7 +29,7 @@ for t in range(1, 21):
         table.cell(r, 2).text = str(1000 + t * 10 + r)
         table.cell(r, 3).text = "正常" if r % 2 else "偏低"
     if t == 15:
-        table.cell(3, 1).text = "乐平枢纽"
+        table.cell(3, 1).text = "示例水库"
 
 doc.add_paragraph("本文档结束。")
 doc.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-p8-big.docx"))
