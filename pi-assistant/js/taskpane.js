@@ -875,16 +875,19 @@ function findText(req) {
         var n = 0;
         try { n = doc.Paragraphs.Count; } catch (e) {}
         for (var i = 1; i <= n && hits.length < maxHits; i++) {
-            // 表格里的段落由下面的「表格扫描」负责，这里跳过，避免同一处命中两次（挤占 maxHits）
             var pr = null;
             try { pr = doc.Paragraphs.Item(i).Range; } catch (e) {}
             if (!pr) continue;
-            var inTbl = false;
-            try { inTbl = !!pr.Information(12); } catch (e) {}
-            if (inTbl) continue;
             var raw = cleanText(pr.Text);
             var pos = raw.indexOf(q);
             if (pos < 0) continue;
+            // 「这段是否在表格里」要调 Information(12)（每段一次 COM），
+            // 以前放在匹配之前，等于让「0 命中」的全篇检索也为每段多付一次调用。
+            // 放在命中之后，语义不变（只影响命中段是否计入），开销降到命中段数量级。
+            // 表格里的段落由下面的「表格扫描」负责，这里跳过，避免同一处命中两次（挤占 maxHits）
+            var inTbl = false;
+            try { inTbl = !!pr.Information(12); } catch (e) {}
+            if (inTbl) continue;
             var flat = raw.replace(/\s+/g, " ").trim();
             if (flat.length > 160) {
                 var s0 = Math.max(0, pos - 50);
@@ -921,7 +924,22 @@ function findText(req) {
     return hits.length ? head + "\n" + hits.join("\n") : head;
 }
 
-// 面板侧统一入口：bridge 转来一条读取请求
+// ---------- 面板侧统一入口：bridge 转来一条读取请求 ----------
+// doc_eval 的黑名单。只是「抬高门槛」，不是沙箱：真正的保证是这条链路只由本机 agent 触发。
+// 白名单式校验不可行（读属性本来就要写 JS 表达式），所以按「写入动作的特征」逐条拦。
+var EV_WRITE_PATTERNS = [
+    { re: /TrackRevisions/, why: "改修订开关" },
+    { re: /\.Save(As)?\s*\(/i, why: "保存" },
+    { re: /\.Delete\s*\(|\.Cut\s*\(|FileCopy|WScript|Shell\s*\(/i, why: "删除/文件/系统调用" },
+    { re: /\.Paste|\.Copy\s*\(/, why: "剪贴板" },
+    { re: /InsertBefore\s*\(|InsertAfter\s*\(|InsertParagraph\w*\s*\(/, why: "插入内容" },
+    { re: /TypeText\s*\(|\.Add\s*\(/i, why: "新增对象" },
+    { re: /\.Clear\s*\(|\.Undo\s*\(|\.Redo\s*\(/i, why: "清空/撤销" },
+    { re: /\.Range\s*\([^)]*\)\s*\.\s*Text\s*=[^=]/, why: "按 Range 写文本" },
+    { re: /\bText\s*=[^=]/, why: "给 Text 赋值" },
+    { re: /\[\s*["'](Content|Range|Text|Selection)["']\s*\]\s*=/, why: "用下标绕过属性写" }
+];
+
 function handleDocReq(req) {
     req = req || {};
     var kind = req.kind || (req.what ? "read" : "info");
@@ -954,8 +972,10 @@ function handleDocReq(req) {
             var evCode = String(req.code || "");
             if (!evCode.trim()) return { ok: false, error: "code 不能为空" };
             if (evCode.length > 4000) return { ok: false, error: "code 超过 4000 字符上限（拆小步）" };
-            if (/TrackRevisions|\.Save(As)?\s*\(|\.Delete\s*\(|\.Paste|\.Copy\s*\(|FileCopy|WScript|Shell\s*\(|\.Add\s*\(/.test(evCode))
-                return { ok: false, error: "doc_eval 只允许只读代码（检测到写入/系统调用迹象）；要改文档请用 wps-* 代码块" };
+            for (var evi = 0; evi < EV_WRITE_PATTERNS.length; evi++) {
+                if (EV_WRITE_PATTERNS[evi].re.test(evCode))
+                    return { ok: false, error: "doc_eval 只允许只读代码（命中疑似写入：" + EV_WRITE_PATTERNS[evi].why + "）；要改文档请用 wps-* 代码块" };
+            }
             var evApp = window.Application;
             var evDoc = evApp.ActiveDocument;
             if (!evDoc) return { ok: false, error: "当前没有打开的文档" };
@@ -972,9 +992,17 @@ function handleDocReq(req) {
             return { ok: true, text: evOut };
         }
         if (kind === "dev_apply") {
-            // 仅本机测试脚本用：把一段「回复文本」里的 wps-* 块按正式流程应用一遍，返回各项报告
-            var rawTxt = String(req.text || "");
+            // 仅本机测试脚本用：把一段「回复文本」里的 wps-* 块按正式流程应用一遍，返回各项报告。
+            // 也支持直接给 edits 数组（带耗时）。以前这里有第二份 dev_apply 分支，永远不会命中，
+            // 两份实现各改一半就成了隐患，现在合成一份。
+            var devT0 = (new Date()).getTime();
             var rep = [];
+            if (Array.isArray(req.edits) && req.edits.length) {
+                beginTurn();
+                try { rep.push(applyEdits(req.edits)); } finally { endTurn(); }
+                return { ok: true, text: rep.join("\n---\n") + "\n[dev_apply edits=" + req.edits.length + " elapsed=" + ((new Date()).getTime() - devT0) + "ms]" };
+            }
+            var rawTxt = String(req.text || "");
             var eA = parseEdits(rawTxt);
             var hA = parseHFs(eA.clean);
             var pA = parsePages(hA.clean);
@@ -985,7 +1013,7 @@ function handleDocReq(req) {
             if (fA.formats && fA.formats.length) rep.push(applyFormats(fA.formats));
             if (cA.cells && cA.cells.length) rep.push(applyCells(cA.cells));
             if (eA.edits && eA.edits.length) rep.push(applyEdits(eA.edits));
-            return { ok: true, text: rep.join("\n---\n") || "（没有可应用的块）" };
+            return { ok: true, text: (rep.join("\n---\n") || "（没有可应用的块）") + "\n[dev_apply elapsed=" + ((new Date()).getTime() - devT0) + "ms]" };
         }
         if (kind === "dev_cell") {
             var dd = window.Application.ActiveDocument;
@@ -1015,14 +1043,6 @@ function handleDocReq(req) {
             var devRep = applyCells(req.cells || []);
             endTurn();
             return { ok: true, text: devRep };
-        }
-        if (kind === "dev_apply") {
-            var devEdits = req.edits || [];
-            var devT0 = (new Date()).getTime();
-            beginTurn();
-            var devRep;
-            try { devRep = applyEdits(devEdits); } finally { endTurn(); }
-            return { ok: true, text: String(devRep) + "\n[dev_apply edits=" + devEdits.length + " elapsed=" + ((new Date()).getTime() - devT0) + "ms]" };
         }
         if (kind === "dev_revs") {
             var rd = window.Application.ActiveDocument;
@@ -1315,15 +1335,12 @@ function switchSession(file) {
 }
 
 // 剥掉所有编辑指令代码块，只留说明文字（历史渲染与流式预览共用）
+// 把回复里的指令块全部剥掉，只留给人看的说明文字。
+// 用 BLOCK_SPECS 统一清单：以前这里只列了 7 类，wps-cells/headerfooter/page/format
+// 的原始 JSON 会漏进聊天气泡（含 done 事件的收尾重排）。
 function stripBlocks(txt) {
-    var s = txt || "";
-    s = parseEdits(s).clean;
-    s = parseComments(s).clean;
-    s = parseRows(s).clean;
-    s = parseImages(s).clean;
-    s = parseTables(s).clean;
-    s = parseOps(s).clean;
-    s = parseParas(s).clean;
+    var s = String(txt || "");
+    for (var i = 0; i < BLOCK_SPECS.length; i++) s = BLOCK_SPECS[i].parse(s).clean;
     return s;
 }
 
@@ -1398,7 +1415,9 @@ function sendMsg() {
         }).then(function (r) { return r.json(); })
           .then(function (j) {
               if (!j.ok) {
-                  addMsg("sys", "⚠ 发送失败：pi 未启动或会话切换失败");
+                  // bridge 现在会说明原因（例如 409「上一条还在处理中」），直接透出来，
+                  // 别让用户对着「pi 未启动」这句万能文案猜。
+                  addMsg("sys", "⚠ 发送失败：" + (j.error || "pi 未启动或会话切换失败"));
                   setTitleMark(false); setStatus("");
               }
           })
@@ -1414,16 +1433,41 @@ function stopPi() {
 }
 
 // ---------- wps-edits / wps-comments 解析与执行 ----------
+// 解析某一类指令块。agent 可能把同一类块拆成多个（分段输出、或一次给多条指令分块），
+// 以前正则没有 g 标志：只认第一个块——第二个块既不会被应用，也不会被 stripBlocks 剥掉，
+// 于是原始 JSON 直接漏到聊天气泡里。这里改成「全部取出 + 合并 + 全部剥掉」：
+//   · 数组字段（edits/comments/rows/...）按出现顺序拼接
+//   · 其余字段以第一个块为准
 function parseBlock(text, tag) {
-    var re = new RegExp("```" + tag + "\\s*([\\s\\S]*?)```");
-    var m = text.match(re);
-    if (!m) return { data: null, clean: text, raw: null };
-    var clean = text.replace(new RegExp("```" + tag + "\\s*[\\s\\S]*?```"), "").trim();
-    try {
-        return { data: JSON.parse(m[1].trim()), clean: clean, raw: m[1].trim() };
-    } catch (e) {
-        return { data: null, clean: clean + "\n⚠ " + tag + " 解析失败: " + e.message, raw: null };
+    var src = String(text || "");
+    var body = "```" + tag + "\\s*([\\s\\S]*?)```";
+    var m = src.match(new RegExp(body));
+    if (!m) return { data: null, clean: src, raw: null };
+    var clean = src.replace(new RegExp(body, "g"), "").trim();
+    var bodies = [], mm, scan = new RegExp(body, "g");
+    while ((mm = scan.exec(src)) !== null) bodies.push(mm[1].trim());
+    var data = null, bad = null;
+    for (var i = 0; i < bodies.length; i++) {
+        var one;
+        try { one = JSON.parse(bodies[i]); }
+        catch (e) {
+            bad = bad || (tag + " 第 " + (i + 1) + " 块解析失败: " + e.message);
+            continue;
+        }
+        if (one === null || typeof one !== "object") continue;
+        if (!data) { data = one; continue; }
+        for (var k in one) {
+            if (!Object.prototype.hasOwnProperty.call(one, k)) continue;
+            if (Array.isArray(one[k]) && Array.isArray(data[k])) data[k] = data[k].concat(one[k]);
+            else if (data[k] === undefined) data[k] = one[k];
+        }
     }
+    var out = { data: data, clean: clean, raw: bodies.join("\n\n") };
+    if (bad) {
+        out.clean = clean + "\n⚠ " + bad;
+        out.warn = bad;
+    }
+    return out;
 }
 
 function parseEdits(text) {
@@ -1538,7 +1582,15 @@ function applyEdits(edits) {
                 if (rep) doc.Paragraphs.Item(hitPara + 1).Range.InsertBefore(rep);
                 applied.push({ find: ed.find, replace: rep, mode: "insertAfter" });
                 report.push("✓ 在第" + hitPara + "段后插入新段落：" + (rep.length > 30 ? rep.slice(0, 30) + "…" : rep) + (ed.reason ? "　" + ed.reason : ""));
-                pTexts = null;   // 段落数变了，后面要重新读一遍
+                // 段落数多了一段。以前这里把 pTexts 置空，于是下一条 edit 又要全篇重读（大文档十几秒）；
+                // 其实只需把新段真实文字插进数组，后续下标自动右移一位。
+                var insCnt = 0;
+                try { insCnt = doc.Paragraphs.Count; } catch (e2) {}
+                if (insCnt === pTexts.length + 1) {
+                    pTexts.splice(hitAt + 1, 0, paraTextAt(doc, hitAt + 1));
+                } else {
+                    pTexts = null;   // 段数没按预期变化（表格内/文末等），退回全篇重读
+                }
             } else if (mode === "delete") {
                 var origDel = bodyText(pTexts[hitAt]);
                 hit.Text = "";
@@ -2527,17 +2579,25 @@ function undoLastTurn() {
     }
 
     // 4) 首选「按修订拒绝」：WPS 原生语义，文字能精确回到改动前，也不留空壳修订。
-    //    只有拒绝失败（WPS 把本轮改动并进了别的修订、次数对不上）才退回下面的文本级还原。
+    //    只拒绝本轮自己记下的区间 [from,to]。以前是 while (count > from-1) 一路往下拒，
+    //    会把「本轮之后你在 WPS 里手工改出来」的修订一起退掉——那是用户的工作，不能动。
+    //    从 to 往 from 倒着拒：拒绝低序号会让高序号前移，从尾部开始序号才是稳的。
     var rejDone = false;
     if (ent.rev) {
         try {
-            var wantCount = (ent.rev.from || 1) - 1;
-            var guardN = 0, curN = doc.Revisions.Count;
-            while (curN > wantCount && guardN++ < 900) {
-                doc.Revisions.Item(curN).Reject();
-                curN = doc.Revisions.Count;
+            var revFrom = Math.max(1, ent.rev.from || 1);
+            if (doc.Revisions.Count < revFrom) {
+                rejDone = true;   // 区间已被你手工接受/拒绝掉了，不要再动文字
+            } else {
+                var revTo = ent.rev.to || revFrom;
+                if (revTo > doc.Revisions.Count) revTo = doc.Revisions.Count;
+                var rIdx = revTo, rejN = 0;
+                while (rIdx >= revFrom && rejN++ < 900) {
+                    doc.Revisions.Item(rIdx).Reject();
+                    rIdx--;
+                }
+                rejDone = (rIdx < revFrom);
             }
-            rejDone = (curN <= wantCount);
         } catch (erj) { rejDone = false; }
     }
     if (rejDone) { reverted = 0; }
@@ -2636,8 +2696,9 @@ function undoLastTurn() {
     if (ent.struct) parts.push("表格结构改动 " + ent.struct + " 处需在 WPS 里按 Ctrl+Z 逐步回退");
     var left = 0;
     for (var z = 0; z < undoStack.length; z++) if (undoStack[z].docKey === ent.docKey) left++;
+    var tailNote = ent.rev ? "　只回退本轮 AI 修订，你自己在 WPS 里做的修订不受影响" : "";
     addMsg("edit", parts.length
-        ? "↩ 已撤销一轮 AI 改动（" + parts.join("，") + "）" + (left ? "　还可继续撤销 " + left + " 轮" : "") + "　耗时 " + uSecs + " 秒"
+        ? "↩ 已撤销一轮 AI 改动（" + parts.join("，") + "）" + (left ? "　还可继续撤销 " + left + " 轮" : "") + "　耗时 " + uSecs + " 秒" + tailNote
         : "↩ 未能撤销（改动可能已被手动接受或删除）");
     updateUndoBtn();
     nudgeRepaint();
@@ -2804,53 +2865,51 @@ function runProbe(silent) {
 
 // 把一轮回复里的各类改动块写进文档。拆成独立函数 + setTimeout 调用，
 // 是为了先让「正在写入…」渲染出来；以前在 done 事件里同步跑，界面看着像卡死。
+// ---------- wps-* 指令块总表（唯一的清单） ----------
+// 解析顺序、块标签、中文名、字段名、执行函数、计数单位都在这一处。
+// 以前这份清单在四个地方各写了一遍（done 事件里的解析链、blocks 数组、nAll 求和、finishTurn 里的 11 个 if），
+// 加一类指令要改四处、漏一处就静默失效。现在只维护这张表。
+var BLOCK_SPECS = [
+    { tag: "wps-edits",       name: "修订",        field: "edits",    apply: applyEdits,       unit: "处", parse: parseEdits },
+    { tag: "wps-comments",    name: "批注",        field: "comments", apply: applyComments,    unit: "条", parse: parseComments },
+    { tag: "wps-rows",        name: "表格加行",    field: "rows",     apply: applyRows,        unit: "行", parse: parseRows },
+    { tag: "wps-image",       name: "插入图片",    field: "images",   apply: applyImages,      unit: "张", parse: parseImages },
+    { tag: "wps-tables",      name: "新建表格",    field: "tables",   apply: applyTables,      unit: "个", parse: parseTables },
+    { tag: "wps-tableops",    name: "表格结构调整", field: "ops",     apply: applyOps,         unit: "处", parse: parseOps },
+    { tag: "wps-paragraphs",  name: "插入段落",    field: "paras",    apply: applyParas,       unit: "组", parse: parseParas },
+    { tag: "wps-cells",       name: "填写单元格",  field: "cells",    apply: applyCells,       unit: "个", parse: parseCells },
+    { tag: "wps-headerfooter",name: "页眉页脚",    field: "hfs",      apply: applyHeaderFooters, unit: "处", parse: parseHFs },
+    { tag: "wps-page",        name: "页面设置",    field: "pages",    apply: applyPageSetup,   unit: "项", parse: parsePages },
+    { tag: "wps-format",      name: "格式",        field: "formats",  apply: applyFormats,     unit: "组", parse: parseFormats }
+];
+
+// 按 BLOCK_SPECS 顺序把一条回复里的指令块全部解析出来（每类都从上一类剥完的文本继续，避免重复匹配）。
+// 返回 { items: {字段名: 数组}, blocks: [{tag,name,items,raw}], clean, nAll }
+function parseAllBlocks(text) {
+    var items = {}, blocks = [], nAll = 0;
+    var clean = String(text || "");
+    for (var i = 0; i < BLOCK_SPECS.length; i++) {
+        var s = BLOCK_SPECS[i];
+        var r = s.parse(clean);
+        clean = r.clean;
+        var list = r[s.field] || [];
+        items[s.field] = list;
+        nAll += list.length;
+        if (list.length || r.raw) blocks.push({ tag: s.tag, name: s.name, items: list, raw: r.raw });
+    }
+    return { items: items, blocks: blocks, clean: clean, nAll: nAll };
+}
+
 function finishTurn(b) {
     var did = [];
     try {
         beginTurn();
-        if (b.parsed.edits && b.parsed.edits.length) {
-            addMsg("edit", applyEdits(b.parsed.edits));
-            did.push("修订 " + b.parsed.edits.length + " 处");
-        }
-        if (b.cmt.comments && b.cmt.comments.length) {
-            addMsg("edit", applyComments(b.cmt.comments));
-            did.push("批注 " + b.cmt.comments.length + " 条");
-        }
-        if (b.rws.rows && b.rws.rows.length) {
-            addMsg("edit", applyRows(b.rws.rows));
-            did.push("表格加行 " + b.rws.rows.length + " 行");
-        }
-        if (b.imgs.images && b.imgs.images.length) {
-            addMsg("edit", applyImages(b.imgs.images));
-            did.push("插入图片 " + b.imgs.images.length + " 张");
-        }
-        if (b.tbls.tables && b.tbls.tables.length) {
-            addMsg("edit", applyTables(b.tbls.tables));
-            did.push("新建表格 " + b.tbls.tables.length + " 个");
-        }
-        if (b.opsb.ops && b.opsb.ops.length) {
-            addMsg("edit", applyOps(b.opsb.ops));
-            did.push("表格结构调整 " + b.opsb.ops.length + " 处");
-        }
-        if (b.prb.paras && b.prb.paras.length) {
-            addMsg("edit", applyParas(b.prb.paras));
-            did.push("插入段落 " + b.prb.paras.length + " 组");
-        }
-        if (b.clb.cells && b.clb.cells.length) {
-            addMsg("edit", applyCells(b.clb.cells));
-            did.push("填写单元格 " + b.clb.cells.length + " 个");
-        }
-        if (b.hfb.hfs && b.hfb.hfs.length) {
-            addMsg("edit", applyHeaderFooters(b.hfb.hfs));
-            did.push("页眉页脚 " + b.hfb.hfs.length + " 处");
-        }
-        if (b.pgb.pages && b.pgb.pages.length) {
-            addMsg("edit", applyPageSetup(b.pgb.pages));
-            did.push("页面设置 " + b.pgb.pages.length + " 项");
-        }
-        if (b.fmb.formats && b.fmb.formats.length) {
-            addMsg("edit", applyFormats(b.fmb.formats));
-            did.push("格式 " + b.fmb.formats.length + " 组");
+        for (var i = 0; i < BLOCK_SPECS.length; i++) {
+            var s = BLOCK_SPECS[i];
+            var list = (b.items && b.items[s.field]) || [];
+            if (!list.length) continue;
+            addMsg("edit", String(s.apply(list)));
+            did.push(s.name + " " + list.length + " " + s.unit);
         }
         if (b.blocks) addBlockDisclosure(lastAiBubble(), b.blocks);
         endTurn();
@@ -2866,6 +2925,8 @@ function finishTurn(b) {
 // ---------- SSE ----------
 var aiBuf = "";
 var aiDiv = null;
+var toolNames = [];    // 本轮已调用的工具名（连续调用合并成一行显示）
+var toolMsgEl = null;  // 那一行「⚙ 调用工具」元素，复用而不是每次新建
 var es = null;
 var esHintShown = false;
 
@@ -2947,51 +3008,37 @@ function connectSSE() {
                 setTitleMark(true);
             }
             setStatus("正在调用 " + d.name + "…");
-            addMsg("sys", "⚙ 调用工具：" + d.name);  // 留一条痕迹，文字气泡会被流式内容覆盖
+            // 连续的工具调用合并成同一行（原地更新）。以前每个工具 addMsg 一条，
+            // 一次调研能刷十几行把正文顶出屏幕。
+            if (!toolNames.length) { toolNames = []; toolMsgEl = null; }
+            toolNames.push(d.name);
+            var boxT = $("chatBox");
+            var lineT = "⚙ 调用工具：" + toolNames.slice(-6).join(" → ") +
+                (toolNames.length > 6 ? " …（共 " + toolNames.length + " 次）" : "");
+            if (toolMsgEl && toolMsgEl.parentNode && toolMsgEl === boxT.lastElementChild) {
+                toolMsgEl.textContent = lineT;
+            } else {
+                toolMsgEl = addMsg("sys", lineT);
+            }
             aiDiv.textContent = (aiBuf ? streamPreview(aiBuf) + "\n\n" : "") + "⚙ 正在使用 " + d.name + " …";
-            var boxT = $("chatBox"); boxT.scrollTop = boxT.scrollHeight;
+            boxT.scrollTop = boxT.scrollHeight;
         } else if (d.type === "done") {
-            var parsed = parseEdits(d.text || aiBuf);
-            var cmt = parseComments(parsed.clean);
-            var rws = parseRows(cmt.clean);
-            var imgs = parseImages(rws.clean);
-            var tbls = parseTables(imgs.clean);
-            var opsb = parseOps(tbls.clean);
-            var prb = parseParas(opsb.clean);
-            var clb = parseCells(prb.clean);
-            var hfb = parseHFs(clb.clean);
-            var pgb = parsePages(hfb.clean);
-            var fmb = parseFormats(pgb.clean);
+            var all = parseAllBlocks(d.text || aiBuf);
             aiBuf = "";
+            toolNames = []; toolMsgEl = null;   // 本轮工具行结算，下一轮重新开一行
             if (aiDiv) {
-                if (fmb.clean && fmb.clean.trim()) {
+                if (all.clean && all.clean.trim()) {
                     aiDiv.className = "msg ai md";
-                    aiDiv.innerHTML = mdToHtml(fmb.clean);   // 流式阶段是纯文本，收尾时按 Markdown 重排一次
+                    aiDiv.innerHTML = mdToHtml(all.clean);   // 流式阶段是纯文本，收尾时按 Markdown 重排一次
                 }
                 else if (aiDiv.parentNode) aiDiv.parentNode.removeChild(aiDiv);  // 工具轮次没留下文字就别留空气泡
                 aiDiv = null;
             }
-            else if (fmb.clean) addMsg("ai", fmb.clean);
+            else if (all.clean) addMsg("ai", all.clean);
             setTitleMark(false);
-            var b = { parsed: parsed, cmt: cmt, rws: rws, imgs: imgs, tbls: tbls, opsb: opsb, prb: prb, clb: clb,
-                hfb: hfb, pgb: pgb, fmb: fmb,
-                blocks: [
-                    { tag: "wps-edits", name: "修订", items: parsed.edits, raw: parsed.raw },
-                    { tag: "wps-comments", name: "批注", items: cmt.comments, raw: cmt.raw },
-                    { tag: "wps-rows", name: "加行", items: rws.rows, raw: rws.raw },
-                    { tag: "wps-image", name: "插图", items: imgs.images, raw: imgs.raw },
-                    { tag: "wps-tables", name: "建表", items: tbls.tables, raw: tbls.raw },
-                    { tag: "wps-tableops", name: "表结构", items: opsb.ops, raw: opsb.raw },
-                    { tag: "wps-paragraphs", name: "段落", items: prb.paras, raw: prb.raw },
-                    { tag: "wps-cells", name: "填单元格", items: clb.cells, raw: clb.raw },
-                    { tag: "wps-headerfooter", name: "页眉页脚", items: hfb.hfs, raw: hfb.raw },
-                    { tag: "wps-page", name: "页面设置", items: pgb.pages, raw: pgb.raw },
-                    { tag: "wps-format", name: "格式", items: fmb.formats, raw: fmb.raw }
-                ] };
-            var nEdits = (parsed.edits || []).length;
-            var nAll = nEdits + (cmt.comments || []).length + (rws.rows || []).length + (imgs.images || []).length +
-                (tbls.tables || []).length + (opsb.ops || []).length + (prb.paras || []).length + (clb.cells || []).length +
-                (hfb.hfs || []).length + (pgb.pages || []).length + (fmb.formats || []).length;
+            var b = { items: all.items, blocks: all.blocks };
+            var nEdits = all.items.edits.length;
+            var nAll = all.nAll;
             if (!nAll) {
                 setStatus("");
             } else {
@@ -3004,6 +3051,7 @@ function connectSSE() {
         } else if (d.type === "error") {
             addMsg("sys", "⚠ " + d.error);
             aiBuf = ""; aiDiv = null;
+            toolNames = []; toolMsgEl = null;
             setTitleMark(false);
             setStatus("");
         }

@@ -1,8 +1,8 @@
 {
 	"name": "pi-assistant",
 	"addonType": "wps",
-	"version": "0.1.0",
-	"description": "WPS 内嵌 pi agent 文档编辑助手（P0 验证版）",
+	"version": "0.2.15",
+	"description": "WPS 内嵌 pi agent 文档编辑助手（任务窗格加载项）",
 	"scripts": {
 		"dev": "vite --port 3889",
 		"build": "vite build",

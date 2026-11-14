@@ -14,8 +14,47 @@ const http = require("http");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
-const { spawn, execSync } = require("child_process");
+const { spawn, exec, execFile } = require("child_process");
 const { StringDecoder } = require("string_decoder");
+
+// ---------- 日志（带轮转） ----------
+// 以前 debug.log/bridge.log 是纯 append，长期自启运行会无限长大。超过 2 MB 滚成 .1（只留一代）。
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
+function appendLog(file, line) {
+    const full = path.join(__dirname, file);
+    try {
+        let st = null;
+        try { st = fs.statSync(full); } catch {}
+        if (st && st.size > LOG_MAX_BYTES) {
+            try { fs.renameSync(full, full + ".1"); } catch { try { fs.truncateSync(full, 0); } catch {} }
+        }
+        fs.appendFileSync(full, "[" + new Date().toISOString() + "] " + line + "\n", "utf8");
+    } catch {}
+}
+const debugLog = (text) => appendLog("debug.log", text);
+
+// ---------- 本地服务的安全边界 ----------
+// 只监听 127.0.0.1 并不等于「只有本机能用」：浏览器里任意网页都能跨域 POST 到本机端口。
+// 这里加两道门：
+//   1) Host 必须解析到回环地址（挡 DNS rebinding：evil.com 解析到 127.0.0.1 时 Host 仍是 evil.com）
+//   2) 带 Origin 的请求必须命中白名单（挡网页跨域）；不带 Origin 的是本机进程（pi 扩展等），放行
+const ALLOWED_ORIGIN_RE = [
+    /^http:\/\/127\.0\.0\.1(:\d+)?$/,
+    /^http:\/\/localhost(:\d+)?$/,
+    /^https?:\/\/([a-z0-9-]+\.)*wps\.(cn|com)(:\d+)?$/i,   // WPS 内嵌浏览器 / 在线加载项
+    /^https?:\/\/([a-z0-9-]+\.)*kingsoft\.com(:\d+)?$/i,
+    /^(wps|wps-plugin|ksolaunch):\/\//i
+];
+function originAllowed(origin) {
+    if (!origin || origin === "null") return true;   // file:// 页面、非浏览器客户端
+    for (const re of ALLOWED_ORIGIN_RE) if (re.test(origin)) return true;
+    return false;
+}
+function hostAllowed(host) {
+    if (!host) return true;
+    const h = String(host).toLowerCase().replace(/:\d+$/, "");
+    return h === "127.0.0.1" || h === "localhost" || h === "[::1]" || h === "::1";
+}
 
 const PORT = 3987;
 const PROMPT_FILE = path.join(__dirname, "doc-assistant-prompt.md");
@@ -41,6 +80,21 @@ let lastCfg = {};              // 记住配置，自动重启时用
 let currentSessionFile = null; // 当前 pi 会话文件（工具调用记录按它归档）
 let turnTools = [];            // 本轮 prompt 里调用过的工具名
 let assistantIdx = 0;          // 当前会话里已有多少条 assistant 回复（= 本轮回复的序号）
+// 单 pi 进程 + 单值 fullText：上一轮没结束就再发一条，两轮的文字会串到一个泡泡里。
+// 面板侧也会拦（输入框置灰），这里是服务端的最后一道门。
+let busy = false;
+let busyTimer = null;
+function setBusy(on, why) {
+    busy = !!on;
+    if (busyTimer) { clearTimeout(busyTimer); busyTimer = null; }
+    if (busy) {
+        // 兜底解锁：pi 卡死不回 agent_end 时，10 分钟后允许再发，避免永久锁死
+        busyTimer = setTimeout(function () {
+            if (busy) debugLog("busy 超时自动解锁（" + (why || "") + "）");
+            busy = false;
+        }, 10 * 60 * 1000);
+    }
+}
 let reqSeq = 0;
 const pending = new Map();     // rpc 请求 id → {resolve, timer}
 
@@ -256,13 +310,15 @@ function killPi() {
     const proc = piProc;
     piProc = null;
     currentDocKey = null;
+    setBusy(false, "killPi");
     for (const [, p] of pending) { clearTimeout(p.timer); p.resolve(null); }
     pending.clear();
     for (const [, p] of docReadPending) { clearTimeout(p.timer); p.resolve({ ok: false, error: "pi 正在重启，读取中断。" }); }
     docReadPending.clear();
     try {
         if (process.platform === "win32") {
-            execSync("taskkill /PID " + proc.pid + " /T /F", { stdio: "ignore" });
+            // 异步杀进程树：以前 execSync 会把整个桥接（含 SSE 推送）卡住几百毫秒到数秒
+            execFile("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { windowsHide: true }, () => {});
         } else {
             proc.kill("SIGKILL");
         }
@@ -377,8 +433,10 @@ function startPi(cfg) {
             recordTurnTools(!!(fullText && fullText.trim()));
             broadcast({ type: "done", text: fullText, docKey: turnDocKey });
             fullText = "";
+            setBusy(false, "agent_end");
         } else if (ev.type === "response" && ev.success === false && !ev.id) {
             lastError = ev.error || "未知错误";
+            setBusy(false, "response error");
             broadcast({ type: "error", error: lastError, docKey: turnDocKey });
         } else if (ev.type === "auto_retry_end" && ev.success === false) {
             lastError = ev.finalError || "重试失败";
@@ -392,6 +450,7 @@ function startPi(cfg) {
         if (piProc === proc) {
             piProc = null;
             currentDocKey = null;
+            setBusy(false, "pi exit");
             broadcast({ type: "status", text: "pi 进程退出 (code=" + code + ")" + (lastError ? " 错误: " + lastError : "") });
         }
     });
@@ -473,6 +532,15 @@ async function historyFor() {
 const PI_AGENT_DIR = path.join(process.env.USERPROFILE || process.env.HOME || "", ".pi", "agent");
 const PI_AUTH_FILE = path.join(PI_AGENT_DIR, "auth.json");
 let modelsCache = { at: 0, data: null };
+let modelsPending = null;
+
+// 异步执行外部命令（绝不阻塞事件循环）
+function execCmd(cmd, timeoutMs) {
+    return new Promise((resolve) => {
+        exec(cmd, { encoding: "utf8", timeout: timeoutMs || 25000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+            (err, stdout) => resolve(err ? "" : String(stdout || "")));
+    });
+}
 
 function configuredProviders() {
     const out = [];
@@ -483,28 +551,29 @@ function configuredProviders() {
     return out;
 }
 
-function listModels(force) {
+// `pi --list-models` 以前用 execSync：面板每次冷启动都要把桥接卡住最多 25 秒
+// （这期间 SSE 不推送、心跳不响应，看着就像桥接死了）。改异步 + 并发去重。
+async function listModels(force) {
     if (!force && modelsCache.data && Date.now() - modelsCache.at < 5 * 60 * 1000) return modelsCache.data;
-    let table = "";
-    try {
-        table = execSync("pi --list-models", { encoding: "utf8", timeout: 25000, windowsHide: true });
-    } catch (e) {
-        table = "";
-    }
-    const rows = [];
-    const lines = String(table).split(/\r?\n/);
-    for (const ln of lines) {
-        const t = ln.trim();
-        if (!t || /^provider\s+model/i.test(t)) continue;
-        const m = t.split(/\s+/);
-        if (m.length < 5) continue;
-        rows.push({
-            provider: m[0], model: m[1], context: m[2], maxOut: m[3],
-            thinking: m[4] === "yes", images: m[5] === "yes"
-        });
-    }
-    modelsCache = { at: Date.now(), data: { at: Date.now(), rows: rows, providers: configuredProviders() } };
-    return modelsCache.data;
+    if (modelsPending) return modelsPending;
+    modelsPending = (async () => {
+        const table = await execCmd("pi --list-models", 25000);
+        const rows = [];
+        const lines = String(table).split(/\r?\n/);
+        for (const ln of lines) {
+            const t = ln.trim();
+            if (!t || /^provider\s+model/i.test(t)) continue;
+            const m = t.split(/\s+/);
+            if (m.length < 5) continue;
+            rows.push({
+                provider: m[0], model: m[1], context: m[2], maxOut: m[3],
+                thinking: m[4] === "yes", images: m[5] === "yes"
+            });
+        }
+        modelsCache = { at: Date.now(), data: { at: Date.now(), rows: rows, providers: configuredProviders() } };
+        return modelsCache.data;
+    })();
+    try { return await modelsPending; } finally { modelsPending = null; }
 }
 
 // ---------- 静态文件托管（加载项 UI） ----------
@@ -584,7 +653,8 @@ function serveAddin(req, res) {
         return res.end("// debug sdk stub\n");
     }
     const full = path.normalize(path.join(ADDIN_DIR, p));
-    if (!full.startsWith(ADDIN_DIR)) { res.writeHead(403); return res.end("forbidden"); }
+    // 前缀比较必须带分隔符：否则 /../pi-assistant-private 这类同前缀路径会被判成「在目录内」
+    if (!full.startsWith(ADDIN_DIR + path.sep) && full !== ADDIN_DIR) { res.writeHead(403); return res.end("forbidden"); }
     fs.readFile(full, (err, buf) => {
         if (err) { res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }); return res.end("not found: " + p); }
         res.writeHead(200, {
@@ -596,8 +666,22 @@ function serveAddin(req, res) {
 }
 
 const server = http.createServer((req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Headers", "*");
+    // ---- 安全门（见文件头的说明）----
+    if (!hostAllowed(req.headers.host)) {
+        res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+        return res.end("forbidden: host");
+    }
+    const reqOrigin = req.headers.origin;
+    if (!originAllowed(reqOrigin)) {
+        res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+        return res.end("forbidden: origin");
+    }
+    // 只在「确实有 Origin」时回显该 Origin（并 Vary），不再无脑 `*`
+    if (reqOrigin) {
+        res.setHeader("Access-Control-Allow-Origin", reqOrigin);
+        res.setHeader("Vary", "Origin");
+    }
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
 
@@ -607,11 +691,12 @@ const server = http.createServer((req, res) => {
     }
 
     if (req.url === "/events") {
+        // 注意：CORS 头已由上面的安全门设置（回显合法 Origin），这里不能再写死 `*`，
+        // 否则 writeHead 会覆盖掉安全门的结果。
         res.writeHead(200, {
             "Content-Type": "text/event-stream; charset=utf-8",
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*"
+            "Connection": "keep-alive"
         });
         const client = { res };
         sseClients.push(client);
@@ -636,10 +721,7 @@ const server = http.createServer((req, res) => {
         };
         try {
             if (req.url === "/log" && req.method === "POST") {
-                try {
-                    fs.appendFileSync(path.join(__dirname, "debug.log"),
-                        "[" + new Date().toISOString() + "] " + (data.text || "") + "\n", "utf8");
-                } catch {}
+                debugLog(data.text || "");
                 return json(200, { ok: true });
             }
             if (req.url === "/health") {
@@ -647,10 +729,7 @@ const server = http.createServer((req, res) => {
             }
             if (req.url === "/doclog" && req.method === "POST") {
                 // 面板上报当前 docKey，方便排查「会话串了/丢了」类问题
-                try {
-                    fs.appendFileSync(path.join(__dirname, "debug.log"),
-                        "[" + new Date().toISOString() + "] docKey=" + (data.docKey || "") + "\n", "utf8");
-                } catch {}
+                debugLog("docKey=" + (data.docKey || ""));
                 return json(200, { ok: true });
             }
             // 面板心跳：登记「这份文档现在有活面板」，agent 读文档时用来定位
@@ -667,13 +746,10 @@ const server = http.createServer((req, res) => {
             if (req.url === "/docreq" && req.method === "POST") {
                 const reqObj = data.req || {};
                 const r = await requestDoc(reqObj);
-                try {
-                    fs.appendFileSync(path.join(__dirname, "debug.log"),
-                        "[" + new Date().toISOString() + "] docreq kind=" + (reqObj.kind || "")
-                        + " what=" + (reqObj.what || "") + " ok=" + (r.ok !== false)
-                        + " chars=" + ((r.text || "").length)
-                        + (r.error ? " error=" + r.error : "") + "\n", "utf8");
-                } catch {}
+                debugLog("docreq kind=" + (reqObj.kind || "")
+                    + " what=" + (reqObj.what || "") + " ok=" + (r.ok !== false)
+                    + " chars=" + ((r.text || "").length)
+                    + (r.error ? " error=" + r.error : ""));
                 return json(200, { ok: r.ok !== false, text: r.text || "", error: r.error || "" });
             }
             // 面板回传读取结果：唤醒等着的工具调用
@@ -686,7 +762,7 @@ const server = http.createServer((req, res) => {
                 return json(200, { ok: true, count: list.length, skills: list });
             }
             if (req.url.indexOf("/models") === 0) {
-                const d = listModels(req.url.indexOf("force=1") >= 0);
+                const d = await listModels(req.url.indexOf("force=1") >= 0);
                 const cfgP = {};
                 for (const p of d.providers) cfgP[p] = true;
                 const models = d.rows.map(function (r) {
@@ -715,20 +791,14 @@ const server = http.createServer((req, res) => {
                 });
             }
             if (req.url === "/config" && req.method === "POST") {
-                try {
-                    fs.appendFileSync(path.join(__dirname, "debug.log"),
-                        "[" + new Date().toISOString() + "] config provider=" + (data.provider || "") +
-                        " model=" + (data.model || "") + " (panel reconnect or user apply)\n", "utf8");
-                } catch {}
+                debugLog("config provider=" + (data.provider || "") +
+                    " model=" + (data.model || "") + " (panel reconnect or user apply)");
                 startPi(data);
                 return json(200, { ok: true });
             }
             if (req.url === "/context" && req.method === "POST") {
                 if (data.docKey && data.docKey !== currentDocKey) {
-                    try {
-                        fs.appendFileSync(path.join(__dirname, "debug.log"),
-                            "[" + new Date().toISOString() + "] docKey=" + data.docKey + "\n", "utf8");
-                    } catch {}
+                    debugLog("docKey=" + data.docKey);
                 }
                 const ok = await ensurePi();
                 if (!ok) return json(503, { ok: false, error: "pi 启动失败" });
@@ -802,6 +872,7 @@ const server = http.createServer((req, res) => {
                 return json(200, { ok: true, moved: te.list.length });
             }
             if (req.url === "/prompt" && req.method === "POST") {
+                if (busy) return json(409, { ok: false, error: "上一条消息还在处理中，等它结束（或点「停止」）再发。" });
                 const ok = await ensurePi();
                 if (!ok) {
                     broadcast({ type: "error", error: "pi 启动失败，请检查 pi 是否可用" });
@@ -815,33 +886,29 @@ const server = http.createServer((req, res) => {
                 fullText = "";
                 turnDocKey = data.docKey || null;
                 const promptMsg = data.message || "";
-                try {
-                    fs.appendFileSync(path.join(__dirname, "debug.log"),
-                        "[" + new Date().toISOString() + "] prompt docKey=" + (turnDocKey || "")
-                        + " chars=" + promptMsg.length
-                        + " ctx=" + (promptMsg.indexOf("【当前文档】") >= 0 ? "yes" : "no") + "\n", "utf8");
-                } catch {}
+                debugLog("prompt docKey=" + (turnDocKey || "")
+                    + " chars=" + promptMsg.length
+                    + " ctx=" + (promptMsg.indexOf("【当前文档】") >= 0 ? "yes" : "no"));
                 try {
                     piProc.stdin.write(JSON.stringify({ type: "prompt", message: promptMsg }) + "\n");
                 } catch (e) {
                     broadcast({ type: "error", error: "发送失败: " + e.message, docKey: turnDocKey });
                     return json(500, { ok: false });
                 }
+                setBusy(true, "prompt");
                 return json(200, { ok: true });
             }
             if (req.url === "/stop" && req.method === "POST") {
                 if (piProc) {
                     try { piProc.stdin.write(JSON.stringify({ type: "abort" }) + "\n"); } catch {}
                 }
+                setBusy(false, "stop");
                 return json(200, { ok: true });
             }
             if (req.url === "/prune" && req.method === "POST") {
                 const pr = pruneSessions(data);
-                try {
-                    fs.appendFileSync(path.join(__dirname, "debug.log"),
-                        "[" + new Date().toISOString() + "] prune dryRun=" + !!data.dryRun
-                        + " candidates=" + pr.candidates + " deleted=" + pr.deleted + "\n");
-                } catch {}
+                debugLog("prune dryRun=" + !!data.dryRun
+                    + " candidates=" + pr.candidates + " deleted=" + pr.deleted);
                 return json(200, pr);
             }
             if (req.url === "/shutdown" && req.method === "POST") {
@@ -862,8 +929,7 @@ server.listen(PORT, "127.0.0.1", () => {
     // 启动时先「演练」一次清理，把可清理的数量写进 debug.log（不自动删，等用户在面板里点）
     try {
         const dry = pruneSessions({ days: 30, keepPerDoc: 20, dryRun: true });
-        fs.appendFileSync(path.join(__dirname, "debug.log"),
-            "[" + new Date().toISOString() + "] prune-dryrun candidates=" + dry.candidates + "\n", "utf8");
+        debugLog("prune-dryrun candidates=" + dry.candidates);
     } catch {}
     // 配置已持久化：桥接重启后直接拉起 pi，不用等面板重新发 /config
     if (lastCfg && (lastCfg.model || lastCfg.provider)) {
@@ -876,10 +942,7 @@ server.listen(PORT, "127.0.0.1", () => {
 server.on("error", (e) => {
     const code = e && e.code ? e.code : "";
     const msg = e && e.message ? e.message : String(e);
-    try {
-        fs.appendFileSync(path.join(__dirname, "debug.log"),
-            "[" + new Date().toISOString() + "] bridge-listen-error " + code + " " + msg + "\n", "utf8");
-    } catch {}
+    debugLog("bridge-listen-error " + code + " " + msg);
     if (code === "EADDRINUSE") {
         console.error("[bridge] port " + PORT + " is already in use (another bridge already running?).");
     } else {
@@ -893,10 +956,9 @@ server.on("error", (e) => {
 // only showed "桥接未运行" with no clue. Log to debug.log/bridge.log and keep
 // serving other requests instead of taking the process down.
 function crashLog(what, e) {
-    const msg = "[" + new Date().toISOString() + "] " + what + ": " +
-        (e && e.stack ? e.stack : (e && e.message ? e.message : String(e)));
-    try { fs.appendFileSync(path.join(__dirname, "debug.log"), msg + "\n", "utf8"); } catch {}
-    try { fs.appendFileSync(path.join(__dirname, "bridge.log"), msg + "\n", "utf8"); } catch {}
+    const msg = what + ": " + (e && e.stack ? e.stack : (e && e.message ? e.message : String(e)));
+    debugLog(msg);
+    appendLog("bridge.log", msg);
     try { console.error(msg); } catch {}
 }
 process.on("uncaughtException", (e) => { crashLog("uncaughtException", e); });

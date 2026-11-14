@@ -99,6 +99,18 @@ foreach ($d in $dirs) {
     }
 }
 
+# ---- version stamp ----
+# Single source of the version is the git tag resolved above. The panel's
+# <meta name="ver"> stays "dev" in the repo (so a dev checkout is never mistaken
+# for a release); stamp the release version into the staged copy only.
+$tp = Join-Path $stage "pi-assistant\ui\taskpane.html"
+if (-not (Test-Path $tp)) { Fail "missing file: pi-assistant\ui\taskpane.html" }
+$html = [System.IO.File]::ReadAllText($tp)
+$stamped = [regex]::Replace($html, '(<meta\s+name="ver"\s+content=")[^"]*(")', ('${1}' + $Version + '${2}'))
+if ($stamped -eq $html) { Fail "cannot stamp version: <meta name=`"ver`"> not found in taskpane.html" }
+[System.IO.File]::WriteAllText($tp, $stamped, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host ("  stamped panel version: " + $Version)
+
 # ---- sanity checks ----
 Write-Host ""
 Write-Host "Sanity checks ..."
@@ -110,6 +122,8 @@ foreach ($f in @("bridge.js", "pi-assistant\ui\taskpane.html", "pi-assistant\js\
 if (Test-Path (Join-Path $stage "pi-assistant\node_modules")) { Fail "node_modules leaked into the package" }
 if (Test-Path (Join-Path $stage "bridge-config.json")) { Fail "bridge-config.json leaked into the package (may contain an API key)" }
 if ($bad.Count -gt 0) { Fail ("required files missing: " + ($bad -join ", ")) }
+$verOk = ([System.IO.File]::ReadAllText($tp)) -match ('name="ver"\s+content="' + [regex]::Escape($Version) + '"')
+if (-not $verOk) { Fail "version stamp missing in staged taskpane.html" }
 
 # ---- zip ----
 $zip = Join-Path $dist ("wps-pi-assistant-v" + $Version + ".zip")

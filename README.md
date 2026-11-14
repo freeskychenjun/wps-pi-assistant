@@ -8,7 +8,7 @@
 >
 > ⚠️ **关掉 WPS 窗口不等于退出。** WPS 会留 2 个无窗口的 `wps.exe` 残留进程，带着它们再开 WPS **不会**重新加载加载项。改代码/换版本/排查「没选项卡」时，先在任务管理器里结束**所有** `wps.exe` 再启动。
 
-> **分发给同事**：先把发布包打出来（见文末「打包发布」），对方解压到任意位置，**双击 `install-addin.cmd`** 即可——它会自动把加载项注册进 WPS 的 `publish.xml`（先备份、幂等、不影响别人已注册的其他加载项），然后启动桥接。对方机器只需：① 有 Node.js（≥18）和 `pi` 命令；② 首次在 WPS 里信任加载项；③ 在侧栏「模型配置」填自己的 provider/model/API Key（每台机器各配各的，`bridge-config.json` 不进 git）。代码里没有写死盘符或绝对路径，插件目录放哪都行（带中文、空格也可以）；技能目录 `%USERPROFILE%\.claude\skills` 是可选的，没有也能启动（只是少了那批技能）。
+> **分发给同事**：先把发布包打出来（见文末「打包发布」），对方解压到任意位置，**双击 `install-addin.cmd`** 即可——它会自动把加载项注册进 WPS 的 `publish.xml`（先备份、幂等、不影响别人已注册的其他加载项），然后启动桥接。对方机器只需：① 有 Node.js **22 或更高版本**（v22 是实测最低可用版本，`start-bridge.cmd` / `install-addin.ps1` 都会检查）和 `pi` 命令；② 首次在 WPS 里信任加载项；③ 在侧栏「模型配置」填自己的 provider/model/API Key（每台机器各配各的，`bridge-config.json` 不进 git）。代码里没有写死盘符或绝对路径，插件目录放哪都行（带中文、空格也可以）；技能目录 `%USERPROFILE%\.claude\skills` 是可选的，没有也能启动（只是少了那批技能）。
 
 ---
 
@@ -152,10 +152,10 @@
 | 表格里改不动 | 让光标在表格里（摘要会带出「表格 i/n：r 行 × c 列」）；改**已有文字**用 `wps-edits`（find 只认单元格里的文字，整行含 `|` 匹配不到），改**空单元格**必须用 `wps-cells` 按行列号写 |
 | agent 说「填不进去 / 匹配不到」 | 空单元格没有可 match 的文字锚点，让它用 `wps-cells`（例：`{"cells":[{"table":5,"row":5,"col":3,"text":"215"}]}`）；合并单元格不能单独写，改用 `wps-edits` 按锚点文字改 |
 | 撤销后单元格里残留一个字 | 已在 v0.2.1 修（WPS 的 cell.Range.Text 会带 `\u0007` 但 Range.End 不含它，旧算法少删一位）；重开 WPS 即生效 |
-| 一次改几十处后 WPS「卡死」/转圈几分钟 | v0.2.3 已修：旧版 applyEdits 对**每条**修改都全篇扫一遍段落（29 条 × 4081 段 ≈ 12 万次 COM 调用）。现在先一次性读全篇、再本地定位，4000 段文档从约 5 分钟降到约 8 秒；写入期间面板会提示「正在把 N 处修订写进文档…」，别重复点发送。**需要重启 WPS** 才会加载新版面板（诊断里 `dom.htmlVer` 应为 p20 及以上） |
+| 一次改几十处后 WPS「卡死」/转圈几分钟 | v0.2.3 已修：旧版 applyEdits 对**每条**修改都全篇扫一遍段落（29 条 × 4081 段 ≈ 12 万次 COM 调用）。现在先一次性读全篇、再本地定位，4000 段文档从约 5 分钟降到约 8 秒；写入期间面板会提示「正在把 N 处修订写进文档…」，别重复点发送。**需要重启 WPS** 才会加载新版面板（诊断里 `dom.htmlVer` 应显示发布版本号；v0.2.16 起由打包注入，开发态显示 `dev`） |
 | 点「撤销上轮 AI 修订」后卡住 | 同上，v0.2.3 已修（撤销从 4000 段文档约几分钟降到约 1 秒，且改为 WPS 原生「拒绝修订」，文字精确还原、不留残留修订） |
 | 模型下拉是空的 / 显示「读不到模型列表」 | 点「↻」强制刷新；确认命令行 `pi --list-models` 能列出模型（pi 装好、`~/.pi/agent/auth.json` 里有 provider 的 key）；改过桥接记得重启 |
-| 回复里露出 `**` 星号、列表/表格没排版 | v0.2.4 已修：面板现在按 Markdown 渲染 agent 回复（标题/粗体/列表/表格/代码块/引用）；重开 WPS 生效（`dom.htmlVer` 应为 p20 及以上） |
+| 回复里露出 `**` 星号、列表/表格没排版 | v0.2.4 已修：面板现在按 Markdown 渲染 agent 回复（标题/粗体/列表/表格/代码块/引用）；重开 WPS 生效（`dom.htmlVer` 应显示发布版本号） |
 | agent 说读不到文档 | 看 `debug.log` 的 `docreq` 行（`ok=… chars=…`）；若提示「任务窗格没有连着桥接」说明侧栏被关了，重开侧栏即可 |
 | 重启 WPS 后仍没有「AI 助手」选项卡 | 任务管理器 → 详细信息 → 结束**所有** `wps.exe`（包括「应用」里看不到的无窗口残留），再启动 WPS。WPS 会复用常驻进程，不结束它们不会重新读 `publish.xml` |
 | `start-bridge.cmd` 打印 FAILED | 它现在会真探测端口：先看窗口里的提示；再打开 `bridge.log` 看真实报错；常见是端口的旧进程没退（结束所有 `node.exe` 再试）或 Node 太旧 |
@@ -212,9 +212,10 @@ Get-Process wps | Select-Object Id, StartTime, MainWindowTitle
 | `test-docperf.js` | 文档读取性能探针（经 bridge `/docreq` 直测面板读取耗时，需要 WPS 开着对应文档） |
 | `test-cells.js` | 单元格写入/撤销回归（经 `/docreq` 调面板内部调试入口 `dev_cell`/`dev_cells`/`dev_undo`，需要 WPS 开着 `test-p8-merged.docx`） |
 | `test-apply-perf.js` | 批量修订的**纯本地 mock 回归**（`node test-apply-perf.js`，不需要 WPS）：把 `taskpane.js` 里的 `applyEdits` 切出来、喂模拟文档，比对 11 个用例（含"修订模式旧文字保留"的 revKeep 场景）与旧实现的最终文本是否一致 |
+| `test-parse-blocks.js` | `wps-*` 指令块解析的**纯本地回归**（`node test-parse-blocks.js`，不需要 WPS）：同 tag 多块合并、坏块只告警不吞好块、`stripBlocks` 覆盖全部 11 类 |
 | `make-layout-test.py` | 造排版能力回归样本 `test-layout.docx`（A4 纵向 + 页眉页脚 + 3 段正文 + 1 张表） |
 | `make-p8-merged.py` | 造合并单元格回归样本 `test-p8-merged.docx`（标题行合并 + 纵向合并 + 5 个空单元格） |
-| `docs/` | 项目文档：`plugin-pi-agent-方案.md`（开发方案与 P0–P9 演进记录） |
+| `docs/` | 项目文档：`plugin-pi-agent-方案.md`（开发方案与 P0–P9 演进记录）、`代码审查与优化建议-2026-11-14.md`（外部审查）、`代码审查采纳结论-2026-11-14.md`（逐条采纳/不采纳与落地记录） |
 
 **协议要点**：agent 回复里附代码块，侧栏解析后执行。
 
@@ -283,6 +284,19 @@ Get-Process wps | Select-Object Id, StartTime, MainWindowTitle
 
 原因：旧实现「每条修改都全篇扫一遍所有段落」，改 35 处就是 35 × 4081 次 COM 往返。现在改为**一次读全篇段落文字 → 本地查找命中的段落 → 只对命中处实时取 Range 修改**；撤销则优先直接拒绝本轮修订（WPS 原生 API）。写入时面板会先提示「正在把 N 处修订写进文档…」，这期间别重复发送；超过 120 秒会停下并告诉你还剩几处没写（已写的不受影响）。
 
+### 安全边界（v0.2.16 收紧）
+
+桥接只监听 `127.0.0.1:3987`，但「监听回环」本身不等于安全（任何本机程序、任何你能打开的网页都能往这个端口发请求）。v0.2.16 补了四道门：
+
+| 门 | 行为 |
+|---|---|
+| Host 校验 | `Host` 不是 `127.0.0.1`/`localhost`/`[::1]` 一律 403。挡的是 DNS rebinding（恶意网页把自己的域名解析到 127.0.0.1 再跨站调你的本地服务） |
+| Origin 白名单 | 只有回环地址、`*.wps.cn` / `*.kingsoft.com`（WPS 的 webview 宿主）和 `wps://`、`wps-plugin://` 这类自定义 scheme 放行；其余 / 陌生来源 403。无 `Origin` 的请求（命令行、本机脚本）照旧放行 |
+| 静态目录穿越 | `/addin/...` 只提供加载项目录里的文件，`..` 跳出目录直接 403 |
+| 并发发送 | 同一时刻只处理一条消息。上一条还在跑时再发会回 409 并在面板里显示原因，不再出现「两个回复互相覆盖、文本串进别人的文档」 |
+
+`doc_eval` 的只读黑名单也加严了（`InsertBefore/InsertAfter/InsertParagraph/TypeText/Text=…` 等写入写法都会被拒），日志改成 2 MB 自动轮转（`debug.log` → `debug.log.1`），不再无限增长。
+
 ---
 
 ## 六、开发模式（改代码时用）
@@ -313,7 +327,7 @@ git diff                    # 未暂存的具体改动
 
 **不入库的东西**（见 `.gitignore`）：`node_modules/`、所有调试截图（`*.png`）、`sessions/`（会话文件）、`sessions-map.json`、`tool-log.json`、`debug.log`、`bridge-config.json`（**可能含 API Key，绝不提交**）、`authaddin.bak-*.json`、测试生成的 `test-*.docx`（用 `make-*.py` 重新生成）。
 
-当前打过的里程碑标签：`v0.1.0`（P0–P7 完成态）、`v0.2.1`（取消上下文下拉 + 合并单元格读写）、`v0.2.2`（一键注册加载项 + 发布打包）、`v0.2.3`（大文档写入/撤销提速，修「改全文像卡死」）、`v0.2.4`（面板回复按 Markdown 渲染）、`v0.2.5`（模型下拉：从 pi 已配置的模型里选）、`v0.2.6`（回复里的 wps-* 指令块折叠成一行）、`v0.2.7`（读高亮内容）、`v0.2.8`（doc_eval 只读逃生通道）、`v0.2.9`（页眉页脚 + 页面设置 + 段落格式写入）。查看/回退：
+当前打过的里程碑标签：`v0.1.0`（P0–P7 完成态）、`v0.2.1`（取消上下文下拉 + 合并单元格读写）、`v0.2.2`（一键注册加载项 + 发布打包）、`v0.2.3`（大文档写入/撤销提速，修「改全文像卡死」）、`v0.2.4`（面板回复按 Markdown 渲染）、`v0.2.5`（模型下拉：从 pi 已配置的模型里选）、`v0.2.6`（回复里的 wps-* 指令块折叠成一行）、`v0.2.7`（读高亮内容）、`v0.2.8`（doc_eval 只读逃生通道）、`v0.2.9`（页眉页脚 + 页面设置 + 段落格式写入）、`v0.2.10`–`v0.2.15`（开机自启 + S4U + 无控制台外壳，见「开机自启」）、`v0.2.16`（安全门：Host/Origin/目录穿越/并发 409 + 撤销只退本轮修订 + `wps-*` 多块合并 + 日志轮转）。查看/回退：
 
 ```powershell
 git tag -l
@@ -329,6 +343,8 @@ git checkout v0.2.1        # 只看不留：看完记得 git switch main
 powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 # 版本号默认取最近的 git 标签，也可 -Version 0.2.2
 ```
+
+**版本号只有一个来源**：git 标签（没有标签时退化成 `0.0.0-日期`）。打包时把这个版本号注入到包里的 `pi-assistant/ui/taskpane.html` 的 `<meta name="ver">`（仓库里是 `dev`），所以发布包里「诊断 → `dom.htmlVer`」显示的就是版本号；`pi-assistant/package.json` 的 `version` 只为了开发工具认版本，不参与打包。
 
 产出 `dist\wps-pi-assistant-v<版本>.zip`（约 100 KB / 26 个文件）。里面只有**生产必需**的文件：`bridge.js`、`pi-doc-tools.js`、`doc-assistant-prompt.md`、`start-bridge.cmd`、`start-bridge.ps1`、`bridge-autostart.ps1`、`watchdog.ps1`、`hidden-run.vbs`、`install-addin.cmd/.ps1`、`README.md`，以及 `pi-assistant/` 的 `index.html`、`main.js`、`manifest.xml`、`ribbon.xml`、`js/`、`ui/`、`images/`。
 
