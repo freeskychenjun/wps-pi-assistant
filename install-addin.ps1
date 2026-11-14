@@ -7,12 +7,15 @@
 #   -Url changes the add-in address (default http://127.0.0.1:3987/addin/; dev mode: http://127.0.0.1:3889/)
 #   -NoAutostart skips creating the logon scheduled task (default: create it)
 #
-# Autostart: creates the planned task "WPSPiAssistantBridge" running node.exe
-#            directly (no cmd/start wrapper) under the S4U logon type, so the
-#            process lives in session 0 with no console that can be closed
-#            (interactive consoles die with 0xC000013A = STATUS_CONTROL_C_EXIT).
+# Autostart: creates the planned task "WPSPiAssistantBridge" that runs
+#            wscript.exe //B hidden-run.vbs <powershell> -File bridge-autostart.ps1
+#            under the S4U logon type. Hidden because a task action of
+#            powershell.exe (or node.exe) still creates a console window that
+#            Windows 11 flashes on the desktop; WScript.Shell.Run with window
+#            style 0 creates no console at all. S4U keeps the process in
+#            session 0 (interactive consoles die with 0xC000013A).
 #            A per-minute watchdog task ("WPSPiAssistantBridgeWatchdog",
-#            watchdog.ps1) restarts it if the port stops listening.
+#            watchdog.ps1, same hidden wrapper) restarts it if the port stops.
 #
 # Behaviour: backs up publish.xml (keeps the newest 5 .bak files), merges the
 #            <jspluginonline> entry idempotently, keeps other add-ins untouched,
@@ -172,19 +175,25 @@ if ($Remove -or $NoAutostart) {
 } elseif (-not $hasSched) {
     Write-Host "      [!] ScheduledTasks module not available - skipping autostart." -ForegroundColor Yellow
 } elseif ($DryRun) {
-    Write-Host ("      (dry-run) would create task: " + $TaskName + " -> powershell -File " + $launcher + " (S4U, no window)")
+    Write-Host ("      (dry-run) would create task: " + $TaskName + " -> wscript //B hidden-run.vbs powershell -File " + $launcher + " (S4U, no console)")
     if (Test-Path $watchdog) {
-        Write-Host ("      (dry-run) would create watchdog: " + $WatchdogName + " -> powershell -File " + $watchdog + " every minute (S4U, no window)")
+        Write-Host ("      (dry-run) would create watchdog: " + $WatchdogName + " -> wscript //B hidden-run.vbs powershell -File " + $watchdog + " every minute (S4U, no console)")
     }
 } else {
-    # Main task: run a small PowerShell launcher instead of node.exe directly.
-    # Launching node.exe as the task action gives the process a console window, and
-    # Windows 11 hands that console to Windows Terminal, so a terminal window pops
-    # up on the desktop (and closing it would kill the bridge). The launcher creates
-    # the bridge through ProcessStartInfo with CreateNoWindow + piped stdio, then
-    # waits, so the task keeps the child tree alive while nothing is ever shown.
+    # Main task: node.exe must never be the task action (Windows 11 hands its
+    # console to Windows Terminal and shows a window), and powershell.exe with
+    # -WindowStyle Hidden STILL creates a console window first, which Win11 then
+    # flashes on the desktop every time the task fires. So the action is
+    #   wscript.exe //B hidden-run.vbs <powershell> -File <launcher>
+    # hidden-run.vbs uses WScript.Shell.Run with window style 0 (no console at
+    # all) and waits for the child, so the task keeps the bridge process alive.
     $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $action = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $launcher + '"') -WorkingDirectory $PSScriptRoot
+    $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+    $hidden = Join-Path $PSScriptRoot "hidden-run.vbs"
+    if (-not (Test-Path $hidden)) {
+        Write-Host "      [!] hidden-run.vbs not found - autostart task would flash a console window." -ForegroundColor Yellow
+    }
+    $action = New-ScheduledTaskAction -Execute $wscript -Argument ('//B "' + $hidden + '" "' + $psExe + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $launcher + '"') -WorkingDirectory $PSScriptRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
     $principal = New-ScheduledTaskPrincipal -UserId ($env:USERDOMAIN + "\" + $env:USERNAME) -LogonType S4U -RunLevel Limited
@@ -197,7 +206,7 @@ if ($Remove -or $NoAutostart) {
     # "schtasks /SC MINUTE" gets LogonType=InteractiveToken and would run inside the
     # logged-on session, briefly flashing a console window every minute.
     if (Test-Path $watchdog) {
-        $wdAction = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $watchdog + '"') -WorkingDirectory $PSScriptRoot
+        $wdAction = New-ScheduledTaskAction -Execute $wscript -Argument ('//B "' + $hidden + '" "' + $psExe + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $watchdog + '"') -WorkingDirectory $PSScriptRoot
         $wdTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1)
         $wdSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $WatchdogName -Action $wdAction -Trigger $wdTrigger -Settings $wdSettings -Principal $principal -Force | Out-Null

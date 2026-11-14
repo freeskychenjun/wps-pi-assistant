@@ -7,6 +7,8 @@
 # Output: dist\wps-pi-assistant-v<version>.zip
 # Included: bridge.js, pi-doc-tools.js, doc-assistant-prompt.md, start-bridge.cmd,
 #           bridge-autostart.ps1 (hidden launcher used by the logon task),
+#           hidden-run.vbs (no-console wrapper: task action runs through
+#                           wscript //B so Windows 11 never flashes a window),
 #           watchdog.ps1 (per-minute watchdog for the logon task),
 #           install-addin.ps1/.cmd, README.md, pi-assistant production files
 #           (index.html, main.js, manifest.xml, ribbon.xml, js/, ui/, images/).
@@ -55,6 +57,7 @@ $files = @(
     "install-addin.ps1",
     "bridge-autostart.ps1",
   "watchdog.ps1",
+    "hidden-run.vbs",
     "install-addin.cmd",
     "README.md",
     "pi-assistant\index.html",

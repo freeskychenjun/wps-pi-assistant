@@ -368,3 +368,25 @@
 - `install-addin.ps1 -NoAddin` 重跑：`publish.xml untouched`，两个任务按新定义重建。
 
 > 排查提醒：`powershell -File xxx.ps1` 自己也会开一个终端窗口（标题通常带「管理员」），别把测试工具产生的窗口当产品现象。
+
+### P22 每分钟闪一下的 PowerShell 窗口：任务外壳改成 wscript 全隐藏（已完成 2026-11-14）
+
+**问题（用户第三次报告）**：把桌面上那个 `管理员: powershell.exe` 终端关掉后，过一会儿它又弹出来，不到 1 秒又自己消失 —— 有节奏地反复。
+
+**定位过程**：
+- 任务计划器历史（`Microsoft-Windows-TaskScheduler/Operational`）确认每分钟都有一批看门狗任务在跑：`cc-connect_Watchdog`（每 30 s）、`Hermes_GatewayWatchdog`、`FixProxyBypass`、`FixOpencodeHosts`、以及本插件的 `WPSPiAssistantBridgeWatchdog`（PT1M）。
+- 关键旁证：本机其它工具的看门狗都**不**用 powershell 当任务 Action，而是 `wscript.exe //B run-hidden.vbs …`；`C:\Users\Administrator\.pi\agent\scripts\run-hidden.vbs` 的注释写得很清楚：*计划任务直接启动 powershell.exe / python.exe 时，会先创建控制台再隐藏，用户每次都会看到黑框闪一下；`-WindowStyle Hidden` 挡不住；`WScript.Shell.Run` 窗口样式 0 完全不创建窗口*。
+- 实测（`tmp\flashmon2.ps1`：EnumWindows 枚举 `CASCADIA_HOSTING_WINDOW_CLASS` / `ConsoleWindowClass` + 250 ms 轮询，200 s）：**每分钟在看门狗任务启动后 0.7–1.3 s，出现一个可见 Windows Terminal 窗口**（标题 `Terminal` → `…powershell.exe` → `管理员: …powershell.exe`）；同一分钟 cc-connect / Hermes 的 wscript 路径没有可见窗口。
+- 决定性对照：`Disable-ScheduledTask WPSPiAssistantBridgeWatchdog` → 监控 135 s → **可见窗口事件 0 个**；`Enable-ScheduledTask` 后又开始闪。→ 闪窗来自本插件的看门狗任务。
+- 原因：v0.2.14 把 Action 改成 `powershell.exe -WindowStyle Hidden -File watchdog.ps1`，但 Windows 仍然会先为控制台程序创建控制台，Win11 把它交给 Windows Terminal 显示出来，然后再隐藏 —— 于是每分钟闪一下。
+
+**做法（v0.2.15）**：
+- 新增 `hidden-run.vbs`（纯 ASCII，通用外壳）：`sh.Run(cmd, 0, True)` —— 窗口样式 0 **不创建任何控制台**；第三参数 `True` 表示等待子进程，这样 wscript 作为任务主进程一直存活，Task Scheduler 不会回收进程树（P17/P21 的坑）。
+- `install-addin.ps1` 的两个任务 Action 都改成 `wscript.exe //B "<目录>\hidden-run.vbs" "<powershell.exe>" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "<目录>\<脚本>"`；`-DryRun` 文案同步；缺 `hidden-run.vbs` 时打印黄字提醒。
+- `pack-release.ps1` 白名单加 `hidden-run.vbs`；README（排错表、文件表、自启表、打包清单）同步。
+
+**验证（本机实测）**：
+- 重建任务后 `Get-ScheduledTask` 显示两个 Action 均为 `wscript.exe //B …hidden-run.vbs …`；
+- 看门狗按分钟触发（`Last Result: 0`）时监控 140 s：**可见窗口事件 0 个**；
+- 杀掉桥接 → `schtasks /Run /TN WPSPiAssistantBridge` → 桥接 6 s 内回来（`pid=3040 session=0 parent=<wscript→powershell>`）、`/health ok:true piRunning:true`，同一次监控里**仍然 0 个可见窗口**；
+- `publish.xml untouched`（注册项无需变动），用户只需重跑一次 `install-addin.cmd` 或 `schtasks /Run` 生效。
