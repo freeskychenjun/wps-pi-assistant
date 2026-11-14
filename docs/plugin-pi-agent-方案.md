@@ -342,3 +342,29 @@
 - 桥接 pi 自动拉起：`piRunning=true, model=deepseek-flash`。
 
 > 结论：想升级到本版不必「重装插件」，`install-addin.cmd` 本身是幂等的（注册项不变时会打印 `publish.xml untouched`），只要重跑它让两个计划任务按新定义重建即可。
+
+### P21 自启任务不再弹终端窗口（隐藏启动器）（已完成 2026-11-14）
+
+**问题（用户两次报告）**：开机/任务重启桥接后，桌面上弹出一个 Windows Terminal 窗口，内容是
+`bridge listening on 127.0.0.1:3987` / `[bridge] auto-start pi: …`；关掉它桥接就跟着退出。
+
+**定位过程**：
+- 窗口类名 `CASCADIA_HOSTING_WINDOW_CLASS`、标题 `pi`，内容正是桥接的控制台输出；
+- 手动 `start-bridge.cmd`（v0.2.12 的隐藏路径）复跑 → `/health` 正常且**零可见窗口** → 手动路径没问题；
+- `schtasks /Run /TN WPSPiAssistantBridge` → 桥接起来（session 0）的同时**必然**出现该窗口；
+- 排除 Windows Terminal 的「恢复上次会话」（settings.json 里没有 `restorePreviousSession`，state.json 也没有保存的标签页）；
+- 结论：**计划任务直接把 `node.exe` 当 Action** 时，node 作为控制台程序会拿到控制台；Win11 默认终端是 Windows Terminal，于是把这份控制台显示成桌面窗口。
+
+**做法**：
+- 新增 `bridge-autostart.ps1`（纯 ASCII，隐藏启动器）：`ProcessStartInfo{ UseShellExecute=false, CreateNoWindow=true, RedirectStandardOutput/Error=true }` 起 `node "bridge.js"`，输出事件追加进 `bridge.log`，再 `WaitForExit()`——任务主进程必须**保持存活**，否则 Task Scheduler 会连 node 一起回收（这就是 P17 踩过的坑）；
+- 新增 `watchdog.ps1`（纯 ASCII）替代 `watch-bridge.cmd`：TcpClient 探 3987，不通则 `Start-ScheduledTask`；
+- `install-addin.ps1` 的两个任务 Action 都改成 `powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File <脚本>`（带 `-WorkingDirectory`）；删除 `watch-bridge.cmd`；
+- `pack-release.ps1` 白名单同步为 `bridge-autostart.ps1` + `watchdog.ps1`。
+
+**验证（本机实测）**：
+- `schtasks /Run` 前后用 `EnumWindows` 枚举 `CASCADIA_HOSTING_WINDOW_CLASS` / `ConsoleWindowClass` 可见窗口：**列表完全一致、没有新增窗口**；
+- 同时 `/health` = `{ok:true, piRunning:true, model:deepseek-flash}`，桥接 pid 71704（session 0，父进程是任务的 powershell 44860）；
+- `tmp\autostart.log` 记 `autostart: starting bridge with C:\Program Files\nodejs\node.exe`，`bridge.log` 收到 `bridge listening…`；
+- `install-addin.ps1 -NoAddin` 重跑：`publish.xml untouched`，两个任务按新定义重建。
+
+> 排查提醒：`powershell -File xxx.ps1` 自己也会开一个终端窗口（标题通常带「管理员」），别把测试工具产生的窗口当产品现象。

@@ -161,6 +161,7 @@
 | `start-bridge.cmd` 打印 FAILED | 它现在会真探测端口：先看窗口里的提示；再打开 `bridge.log` 看真实报错；常见是端口的旧进程没退（结束所有 `node.exe` 再试）或 Node 太旧 |
 | 徽标黄「待配置模型」/「pi 未启动」 | 桥接正常但模型没配：点「▸ 模型」选一个点「应用」。桥接重启后徽标会自动变回绿色，pi 也会自动被拉起 |
 | 想确认自启是否生效 | `schtasks /Query /TN WPSPiAssistantBridge`（状态 Running 正常）；`Get-Content bridge-watchdog.log`、`tmp\autostart.log` 有拉起记录 |
+| 屏幕上有 `bridge listening on 127.0.0.1:3987` 的终端窗口 | v0.2.14 已修：自启任务的 Action 改为隐藏启动器 `bridge-autostart.ps1`。升级后重跑一次 `install-addin.cmd` 重建两个任务；还没升级时可先手动关掉那个窗口（桥接会随之退出），再双击 `start-bridge.cmd` |
 | 端口 3987 被占 | 改 `bridge.js` 里的 PORT 和 `taskpane.js` 里的 BRIDGE 端口 |
 
 ---
@@ -199,7 +200,8 @@ Get-Process wps | Select-Object Id, StartTime, MainWindowTitle
 | `tool-log.json` | 每条回复用过哪些工具/技能的记录（供「历史」显示「⚙ 用过 bash」） |
 | `bridge-config.json` | 桥接记住的模型配置（有 provider/model 时自动生成，桥接重启后自动拉起 pi） |
 | `start-bridge.cmd` / `start-bridge.ps1` | 一键启动桥接（幂等；失败会真探测端口并打印 FAILED，输出落 `bridge.log`）。桥接在**隐藏**控制台里跑，不会弹窗；调试用 `start-bridge.cmd -Show` 看实时输出 |
-| `watch-bridge.cmd` | 每分钟由计划任务调用：3987 没监听就重启桥接任务（看门狗，纯 ASCII） |
+| `bridge-autostart.ps1` | 自启任务的**隐藏启动器**：用 `CreateNoWindow` 起 node，把 stdout/stderr 转进 `bridge.log`，并**一直等待**桥接退出（任务计划器在任务主进程退出时会杀掉整棵进程树） |
+| `watchdog.ps1` | 每分钟由计划任务调用：3987 没监听就用 `Start-ScheduledTask` 把主任务拉起来（看门狗，纯 ASCII，S4U 无窗口） |
 | `bridge.log` / `bridge-watchdog.log` | 桥接的控制台输出 / 看门狗拉起记录（排错用，已 gitignore） |
 | `install-addin.cmd` / `install-addin.ps1` | 一键注册加载项（写 `%APPDATA%\kingsoft\wps\jsaddons\publish.xml`，自动备份、幂等合并、支持 `-Remove` 卸载、`-DryRun` 预览；`.cmd` 注册完顺手启动桥接） |
 | `pack-release.ps1` | 打发布包：`powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1` → `dist\wps-pi-assistant-v<版本>.zip`（只含生产文件，约 70 KB，不含 `node_modules`） |
@@ -326,7 +328,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 # 版本号默认取最近的 git 标签，也可 -Version 0.2.2
 ```
 
-产出 `dist\wps-pi-assistant-v<版本>.zip`（约 100 KB / 23 个文件）。里面只有**生产必需**的文件：`bridge.js`、`pi-doc-tools.js`、`doc-assistant-prompt.md`、`start-bridge.cmd`、`start-bridge.ps1`、`watch-bridge.cmd`、`install-addin.cmd/.ps1`、`README.md`，以及 `pi-assistant/` 的 `index.html`、`main.js`、`manifest.xml`、`ribbon.xml`、`js/`、`ui/`、`images/`。
+产出 `dist\wps-pi-assistant-v<版本>.zip`（约 100 KB / 23 个文件）。里面只有**生产必需**的文件：`bridge.js`、`pi-doc-tools.js`、`doc-assistant-prompt.md`、`start-bridge.cmd`、`start-bridge.ps1`、`bridge-autostart.ps1`、`watchdog.ps1`、`install-addin.cmd/.ps1`、`README.md`，以及 `pi-assistant/` 的 `index.html`、`main.js`、`manifest.xml`、`ribbon.xml`、`js/`、`ui/`、`images/`。
 
 **不含**：`pi-assistant/node_modules`（71 MB，只有 `wpsjs debug` 开发模式要）、`package.json`/`vite.config.js`、`sessions/`、`tmp/`、测试样本、日志、`bridge-config.json`（可能含 API Key）。脚本最后会自检：关键文件在、`node_modules` 和 `bridge-config.json` 没混进去、zip 能生成。
 
@@ -338,8 +340,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack-release.ps1
 
 | 任务 | 作用 |
 |---|---|
-| `WPSPiAssistantBridge` | 登录时启动桥接。Action 是 **`node.exe` 本身**（不经 `cmd`/`start`，否则任务一结束连子进程一起被回收），Principal 用 **S4U**（进程跑在会话 0、没有可被关闭的控制台） |
-| `WPSPiAssistantBridgeWatchdog` | 每分钟跑 `watch-bridge.cmd`：3987 没监听就 `schtasks /run` 把主任务拉起来，任何原因死掉都能在 1 分钟内自愈。同样用 **S4U**（`cmd.exe /c` + `-WindowStyle` 无关，S4U 下本来就无窗口），否则每分钟会在你屏幕上闪一下黑窗 |
+| `WPSPiAssistantBridge` | 登录时启动桥接。Action 是 `powershell.exe -WindowStyle Hidden -File bridge-autostart.ps1`（**不能直接拿 node.exe 当 Action**：v0.2.14 之前就是那样，Windows 11 会把它交给 Windows Terminal 显示成一个带 `bridge listening…` 的终端窗口），Principal 用 **S4U**（进程跑在会话 0、没有可被关闭的控制台） |
+| `WPSPiAssistantBridgeWatchdog` | 每分钟跑 `watchdog.ps1`（`powershell -WindowStyle Hidden -File`）：3987 没监听就 `Start-ScheduledTask` 把主任务拉起来，任何原因死掉都能在 1 分钟内自愈。同样用 **S4U**（会话 0，本来就无窗口），否则每分钟会在你屏幕上闪一下黑窗 |
 
 为什么要 S4U：用「交互式」登录类型的任务时，node 会挂着一个控制台，控制台被关（注销/关闭会话）就收到 `CTRL_CLOSE`，进程以 `0xC000013A` 自杀——表现就是「用了十几分钟桥接自己没了」。
 

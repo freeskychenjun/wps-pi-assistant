@@ -12,7 +12,7 @@
 #            process lives in session 0 with no console that can be closed
 #            (interactive consoles die with 0xC000013A = STATUS_CONTROL_C_EXIT).
 #            A per-minute watchdog task ("WPSPiAssistantBridgeWatchdog",
-#            watch-bridge.cmd) restarts it if the port stops listening.
+#            watchdog.ps1) restarts it if the port stops listening.
 #
 # Behaviour: backs up publish.xml (keeps the newest 5 .bak files), merges the
 #            <jspluginonline> entry idempotently, keeps other add-ins untouched,
@@ -149,7 +149,8 @@ Write-Host "[6/6] autostart (logon scheduled task) ..."
 
 $nodeExe = $null
 try { $nodeExe = (Get-Command node -ErrorAction Stop).Source } catch {}
-$watchdog = Join-Path $PSScriptRoot "watch-bridge.cmd"
+$launcher = Join-Path $PSScriptRoot "bridge-autostart.ps1"
+$watchdog = Join-Path $PSScriptRoot "watchdog.ps1"
 $hasSched = $null -ne (Get-Module -ListAvailable -Name ScheduledTasks)
 
 function Remove-TaskSafe([string]$tn) {
@@ -171,35 +172,38 @@ if ($Remove -or $NoAutostart) {
 } elseif (-not $hasSched) {
     Write-Host "      [!] ScheduledTasks module not available - skipping autostart." -ForegroundColor Yellow
 } elseif ($DryRun) {
-    Write-Host ("      (dry-run) would create task: " + $TaskName + " -> " + $nodeExe + " bridge.js (S4U, no console)")
+    Write-Host ("      (dry-run) would create task: " + $TaskName + " -> powershell -File " + $launcher + " (S4U, no window)")
     if (Test-Path $watchdog) {
-        Write-Host ("      (dry-run) would create watchdog: " + $WatchdogName + " -> " + $watchdog + " every minute (S4U, no window)")
+        Write-Host ("      (dry-run) would create watchdog: " + $WatchdogName + " -> powershell -File " + $watchdog + " every minute (S4U, no window)")
     }
 } else {
-    # main task: node.exe directly as the action (cmd/start wrappers get their child
-    # tree reaped when the wrapper exits) + S4U logon type (no interactive console,
-    # so no CTRL_CLOSE / 0xC000013A when the user logs off or closes a console).
-    $action = New-ScheduledTaskAction -Execute $nodeExe -Argument '"bridge.js"' -WorkingDirectory $PSScriptRoot
+    # Main task: run a small PowerShell launcher instead of node.exe directly.
+    # Launching node.exe as the task action gives the process a console window, and
+    # Windows 11 hands that console to Windows Terminal, so a terminal window pops
+    # up on the desktop (and closing it would kill the bridge). The launcher creates
+    # the bridge through ProcessStartInfo with CreateNoWindow + piped stdio, then
+    # waits, so the task keeps the child tree alive while nothing is ever shown.
+    $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $action = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $launcher + '"') -WorkingDirectory $PSScriptRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
     $principal = New-ScheduledTaskPrincipal -UserId ($env:USERDOMAIN + "\" + $env:USERNAME) -LogonType S4U -RunLevel Limited
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-    Write-Host "      created logon task: $TaskName (S4U, node.exe direct)"
+    Write-Host "      created logon task: $TaskName (S4U, hidden launcher)"
     Write-Host "      node: $nodeExe"
 
-    # watchdog: Task Scheduler "restart on failure" only helps when the task itself
-    # reports failure; a killed node just ends. Probe the port every minute instead.
-    # NOTE: register it with the same S4U principal as the main task. A task created
-    # by "schtasks /SC MINUTE" gets LogonType=InteractiveToken, so the .cmd would run
-    # inside the logged-on session and briefly flash a console window every minute.
+    # Watchdog: probe the port every minute and ask Task Scheduler to restart the
+    # main task. Register it with the same S4U principal; a task created by
+    # "schtasks /SC MINUTE" gets LogonType=InteractiveToken and would run inside the
+    # logged-on session, briefly flashing a console window every minute.
     if (Test-Path $watchdog) {
-        $wdAction = New-ScheduledTaskAction -Execute "cmd.exe" -Argument ('/c "' + $watchdog + '"') -WorkingDirectory $PSScriptRoot
+        $wdAction = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $watchdog + '"') -WorkingDirectory $PSScriptRoot
         $wdTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1)
         $wdSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $WatchdogName -Action $wdAction -Trigger $wdTrigger -Settings $wdSettings -Principal $principal -Force | Out-Null
         Write-Host "      created watchdog task: $WatchdogName (every minute, S4U, no window)"
     } else {
-        Write-Host "      [!] watch-bridge.cmd not found - no watchdog task created." -ForegroundColor Yellow
+        Write-Host "      [!] watchdog.ps1 not found - no watchdog task created." -ForegroundColor Yellow
     }
     Write-Host "      (disable later: install-addin.cmd -Remove, or delete both tasks in Task Scheduler)"
 }
